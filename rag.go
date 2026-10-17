@@ -197,29 +197,50 @@ func (r *RAG) Search(ctx context.Context, q string, k int, rerank bool, p Period
 			pedirID(d, "definicion")
 		}
 	}
+	// Las dos búsquedas son independientes: van en paralelo. Un documento
+	// pedido por similitud puede llegar también por ID; en ese caso se queda
+	// con lo que llegó por ID (como si no se hubiera pedido por similitud).
+	var porIDHits, porDocHits []Hit
+	var wg sync.WaitGroup
 	if len(ordenID) > 0 {
-		extra, err := r.qd.PorIDs(ctx, ordenID)
-		if err != nil {
-			log.Printf("search: no pude traer %v: %v", ordenID, err)
-		}
-		for _, h := range extra {
-			agregarHit(h, porID[h.Payload.ChunkID])
-		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			var err error
+			if porIDHits, err = r.qd.PorIDs(ctx, ordenID); err != nil {
+				log.Printf("search: no pude traer %v: %v", ordenID, err)
+			}
+		}()
 	}
-	var faltan []string
+	if len(ordenDoc) > 0 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			var err error
+			if porDocHits, err = r.qd.DenseEnDocs(ctx, vec, ordenDoc, min(2*len(ordenDoc), 6)); err != nil {
+				log.Printf("search: no pude traer fragmentos de %v: %v", ordenDoc, err)
+			}
+		}()
+	}
+	wg.Wait()
+	llegoPorID := map[string]bool{}
+	for _, h := range porIDHits {
+		agregarHit(h, porID[h.Payload.ChunkID])
+		llegoPorID[h.Payload.DocID] = true
+	}
+	faltan := 0
 	for _, d := range ordenDoc {
-		if !docPresente[d] { // pudo llegar por ID en el paso anterior
-			faltan = append(faltan, d)
+		if !llegoPorID[d] {
+			faltan++
 		}
 	}
-	if len(faltan) > 0 {
-		extra, err := r.qd.DenseEnDocs(ctx, vec, faltan, min(2*len(faltan), 6))
-		if err != nil {
-			log.Printf("search: no pude traer fragmentos de %v: %v", faltan, err)
+	tope, agregados := min(2*faltan, 6), 0
+	for _, h := range porDocHits {
+		if llegoPorID[h.Payload.DocID] || agregados >= tope {
+			continue
 		}
-		for _, h := range extra {
-			agregarHit(h, porDoc[h.Payload.DocID])
-		}
+		agregarHit(h, porDoc[h.Payload.DocID])
+		agregados++
 	}
 
 	out.Alertas = r.alertas(out.Resultados, p)
@@ -370,6 +391,20 @@ func (r *RAG) Periodo(c Consulta) (Periodo, error) {
 	return periodoDia(r.referencia()), nil
 }
 
+// Historial que va al LLM: alcanza con los últimos turnos para resolver una
+// repregunta, y cada turno extra se paga como tokens de entrada.
+const (
+	maxTurnosHistorial = 3
+	maxCharsTurno      = 2000
+)
+
+func ultimosTurnos(h []Turno) []Turno {
+	if len(h) > maxTurnosHistorial {
+		return h[len(h)-maxTurnosHistorial:]
+	}
+	return h
+}
+
 // queryBusqueda: con historial, la pregunta anterior le da contexto a una
 // repregunta corta ("¿Y en marzo de 2027?").
 func queryBusqueda(c Consulta) string {
@@ -398,10 +433,10 @@ func (r *RAG) Ask(ctx context.Context, c Consulta) (*Respuesta, error) {
 		return out, nil
 	}
 	msgs := []Mensaje{{Role: "system", Content: promptSistema}}
-	for _, t := range c.Historial {
-		msgs = append(msgs, Mensaje{Role: "user", Content: t.Pregunta})
+	for _, t := range ultimosTurnos(c.Historial) {
+		msgs = append(msgs, Mensaje{Role: "user", Content: recortar(t.Pregunta, maxCharsTurno)})
 		if t.Respuesta != "" {
-			msgs = append(msgs, Mensaje{Role: "assistant", Content: t.Respuesta})
+			msgs = append(msgs, Mensaje{Role: "assistant", Content: recortar(t.Respuesta, maxCharsTurno)})
 		}
 	}
 	msgs = append(msgs, Mensaje{Role: "user", Content: r.armarPrompt(c.Pregunta, p, sr.Resultados)})
@@ -510,19 +545,25 @@ const (
 // línea. Con "..." la cita se parte en tramos: cada uno de ≥12 caracteres y
 // todos en orden dentro del MISMO chunk.
 func citaValida(fuente, cita string) bool {
+	tramos := tramosCita(cita)
 	// El guion de fin de línea puede ser corte de palabra o guion real: se acepta
 	// la cita si aparece en cualquiera de las dos lecturas de la fuente.
-	return citaEn(normalizar(fuente), cita) ||
-		citaEn(sinAcentos(normCitaCon(fuente, "-")), cita)
+	return citaEn(normalizar(fuente), tramos) ||
+		citaEn(sinAcentos(normCitaCon(fuente, "-")), tramos)
 }
 
-func citaEn(f, cita string) bool {
+// tramosCita normaliza la cita una sola vez y la parte en los tramos separados por "...".
+func tramosCita(cita string) []string {
 	var tramos []string
 	for _, p := range strings.Split(normalizar(cita), "...") {
 		if p = strings.Trim(p, ` .,;:"'`); p != "" {
 			tramos = append(tramos, p)
 		}
 	}
+	return tramos
+}
+
+func citaEn(f string, tramos []string) bool {
 	pos, total := 0, 0
 	for _, p := range tramos {
 		n := utf8.RuneCountInString(p)

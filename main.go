@@ -27,6 +27,7 @@ type Config struct {
 	LLMBase, LLMKey, LLMModel, LLMEffort           string
 	PriceIn, PriceOut                              float64 // USD por millón de tokens
 	RegistryPath, Addr, CORSOrigin                 string
+	APIKey                                         string // API_KEY; vacío = API sin autenticación
 	FechaRef                                       string // FECHA_REFERENCIA; vacío = hoy
 }
 
@@ -72,6 +73,7 @@ func cargarConfig() (Config, error) {
 		RegistryPath:      env("REGISTRY_PATH", "registry.json"),
 		Addr:              env("ADDR", ":8080"),
 		CORSOrigin:        env("CORS_ORIGIN", "*"),
+		APIKey:            env("API_KEY", ""),
 		FechaRef:          env("FECHA_REFERENCIA", ""),
 	}
 	var err error
@@ -145,7 +147,7 @@ func nuevoRAG(cfg Config, reg *Registry, conLLM, conRerank bool) (*RAG, error) {
 	if err != nil {
 		return nil, err
 	}
-	r := &RAG{reg: reg, emb: emb, qd: q, hoy: hoy}
+	r := &RAG{reg: reg, emb: conCache(emb, 256), qd: q, hoy: hoy}
 	if conRerank {
 		if r.rr, err = nuevoReranker(cfg); err != nil {
 			return nil, err

@@ -29,6 +29,8 @@ services:
       - ./registry.json:/app/registry.json:ro
       - ./evals.json:/app/evals.json:ro
     restart: unless-stopped
+    # La API espera hasta 25 s a que terminen los requests en curso al recibir SIGTERM.
+    stop_grace_period: 30s
     deploy:
       resources:
         limits:
