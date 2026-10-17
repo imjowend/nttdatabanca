@@ -42,6 +42,58 @@ func TestCitaValidaTramos(t *testing.T) {
 	}
 }
 
+func TestCitaValidaGuionReal(t *testing.T) {
+	f := "Se evalúa el impacto socio-\neconómico y el regla-\nmento aplicable a cada proceso."
+	casos := map[string]bool{
+		"se evalúa el impacto socio-económico":   true, // guion real al final de línea
+		"se evalúa el impacto socioeconómico":    true, // también se acepta unido
+		"económico y el reglamento aplicable":    true, // corte de palabra
+		"económico y el regla-mento aplicable":   true, // ambigua: se acepta
+		"se evalúa el impacto socio económico y": false,
+	}
+	for cita, want := range casos {
+		if got := citaValida(f, cita); got != want {
+			t.Errorf("citaValida(%q) = %v, quiero %v", cita, got, want)
+		}
+	}
+}
+
+func TestEsperaReintento(t *testing.T) {
+	casos := []struct {
+		h    string
+		want time.Duration
+	}{
+		{"", 2 * time.Second},                            // sin header: backoff
+		{"0", minRetryAfter},                             // 0 → mínimo
+		{"3", 3 * time.Second},                           // valor normal
+		{"3600", maxRetryAfter},                          // enorme → tope
+		{"Mon, 01 Jan 2001 00:00:00 GMT", minRetryAfter}, // fecha pasada → mínimo
+	}
+	for _, c := range casos {
+		if got := esperaReintento(c.h, 2*time.Second); got != c.want {
+			t.Errorf("esperaReintento(%q) = %s, quiero %s", c.h, got, c.want)
+		}
+	}
+}
+
+func TestRechazoSchema(t *testing.T) {
+	casos := []struct {
+		he   httpError
+		want bool
+	}{
+		{httpError{400, `Invalid value at 'response_format'`}, true},
+		{httpError{400, `json_schema is not supported`}, true},
+		{httpError{400, `models/gemini-x is not found`}, false},
+		{httpError{400, `Invalid reasoning_effort`}, false},
+		{httpError{500, `response_format`}, false},
+	}
+	for _, c := range casos {
+		if got := rechazoSchema(&c.he); got != c.want {
+			t.Errorf("rechazoSchema(%d %q) = %v, quiero %v", c.he.Status, c.he.Body, got, c.want)
+		}
+	}
+}
+
 func rapida(p *Politica) *Politica { c := *p; c.Base = time.Millisecond; return &c }
 
 func TestDoJSONProveedorReintentaYRespetaRetryAfter(t *testing.T) {

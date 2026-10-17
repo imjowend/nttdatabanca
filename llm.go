@@ -94,13 +94,21 @@ func (l *LLM) Chat(ctx context.Context, msgs []Mensaje) (string, error) {
 	conSchema := !l.sinSchema.Load()
 	out, err := l.chat(ctx, msgs, conSchema)
 	var he *httpError
-	if conSchema && errors.As(err, &he) && he.Status == 400 {
+	if conSchema && errors.As(err, &he) && rechazoSchema(he) {
 		log.Printf("llm: el endpoint rechazó json_schema (HTTP 400: %s); reintento con json_object",
 			recortar(he.Body, 160))
 		l.sinSchema.Store(true)
 		out, err = l.chat(ctx, msgs, false)
 	}
 	return out, err
+}
+
+// rechazoSchema: solo un 400 que menciona response_format/json_schema justifica
+// el fallback. Otro 400 (modelo inválido, effort, prompt largo) se devuelve tal
+// cual: reintentar no lo arregla y cobraría una segunda request.
+func rechazoSchema(he *httpError) bool {
+	b := strings.ToLower(he.Body)
+	return he.Status == 400 && (strings.Contains(b, "response_format") || strings.Contains(b, "schema"))
 }
 
 func (l *LLM) chat(ctx context.Context, msgs []Mensaje, conSchema bool) (string, error) {

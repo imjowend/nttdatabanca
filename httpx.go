@@ -47,6 +47,23 @@ var (
 		Reintenta: func(s int) bool { return s == 429 || s == 503 }, ErrRed: false}
 )
 
+// Límites a Retry-After: 0 o una fecha pasada no deben generar reintentos
+// inmediatos, y un valor enorme no debe bloquear el request indefinidamente.
+const (
+	minRetryAfter = 500 * time.Millisecond
+	maxRetryAfter = 60 * time.Second
+)
+
+// esperaReintento usa Retry-After si viene, acotado a [minRetryAfter, maxRetryAfter];
+// si no, el backoff exponencial.
+func esperaReintento(h string, backoff time.Duration) time.Duration {
+	d, ok := retryAfter(h)
+	if !ok {
+		return backoff
+	}
+	return min(max(d, minRetryAfter), maxRetryAfter)
+}
+
 // retryAfter interpreta el header Retry-After en segundos o como fecha HTTP.
 func retryAfter(h string) (time.Duration, bool) {
 	if h == "" {
@@ -133,10 +150,7 @@ func doJSON(ctx context.Context, pol *Politica, method, rawURL string, headers m
 		resp.Body.Close()
 
 		if pol.Reintenta != nil && pol.Reintenta(resp.StatusCode) && intento < intentos {
-			w := espera
-			if d, ok := retryAfter(resp.Header.Get("Retry-After")); ok {
-				w = d
-			}
+			w := esperaReintento(resp.Header.Get("Retry-After"), espera)
 			log.Printf("↻ [%s] reintento %d/%d %s %s: HTTP %d, espero %s",
 				pol.Nombre, intento+1, intentos, method, destino(rawURL), resp.StatusCode, w)
 			if err := esperar(ctx, w); err != nil {

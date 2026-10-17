@@ -343,8 +343,13 @@ var (
 
 // normCita: quita guiones de corte de línea, unifica comillas tipográficas,
 // colapsa todo whitespace a un espacio, TrimSpace y ToLower.
-func normCita(s string) string {
-	s = reGuionCorte.ReplaceAllString(s, "")
+func normCita(s string) string { return normCitaCon(s, "") }
+
+// normCitaCon reemplaza el guion de corte de línea por sep: "" lo une
+// ("regla-\nmento" → "reglamento") y "-" lo conserva ("socio-\neconómico" →
+// "socio-económico"). Desde el texto no se sabe cuál de los dos es.
+func normCitaCon(s, sep string) string {
+	s = reGuionCorte.ReplaceAllString(s, sep)
 	s = comillas.Replace(s)
 	s = strings.Join(strings.Fields(s), " ")
 	return strings.ToLower(strings.TrimSpace(s))
@@ -363,7 +368,13 @@ const (
 // línea. Con "..." la cita se parte en tramos: cada uno de ≥12 caracteres y
 // todos en orden dentro del MISMO chunk.
 func citaValida(fuente, cita string) bool {
-	f := normalizar(fuente)
+	// El guion de fin de línea puede ser corte de palabra o guion real: se acepta
+	// la cita si aparece en cualquiera de las dos lecturas de la fuente.
+	return citaEn(normalizar(fuente), cita) ||
+		citaEn(sinAcentos(normCitaCon(fuente, "-")), cita)
+}
+
+func citaEn(f, cita string) bool {
 	var tramos []string
 	for _, p := range strings.Split(normalizar(cita), "...") {
 		if p = strings.Trim(p, ` .,;:"'`); p != "" {
