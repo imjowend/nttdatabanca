@@ -1,0 +1,67 @@
+{
+  "respuesta": "Deben probarse como mínimo dos veces al año [int-pol-continuidad-v2#articulo-3].",
+  "sin_respuesta": false,
+  "citas": [
+    {
+      "chunk_id": "int-pol-continuidad-v2#articulo-3",
+      "cita_textual": "deberán probarse como mínimo dos veces al año",
+      "documento": "Política interna de Continuidad del Negocio (Banco Demo) (POL-CN-01 v2)",
+      "ruta": "Artículo 3",
+      "pagina": 1,
+      "estado": "vigente"
+    }
+  ],
+  "citas_descartadas": 1,
+  "contradicciones": [
+    {
+      "chunk_a": "int-proc-pruebas-bcp#articulo-2",
+      "chunk_b": "int-pol-continuidad-v2#articulo-3",
+      "explicacion": "Una vez al año vs. dos veces al año.",
+      "prevalece": "int-pol-continuidad-v2",
+      "criterio": "mayor jerarquía normativa"
+    }
+  ],
+  "alertas": [
+    {
+      "tipo": "derogado",
+      "doc_id": "int-pol-continuidad-v1",
+      "detalle": "Política interna de Continuidad del Negocio (Banco Demo) (POL-CN-01 v1) fue derogado / dejado sin efecto por Política interna de Continuidad del Negocio (Banco Demo) (POL-CN-01 v2). No usar como norma vigente."
+    }
+  ],
+  "fuentes": [
+    {
+      "chunk_id": "int-pol-continuidad-v1#articulo-3",
+      "doc_id": "int-pol-continuidad-v1",
+      "documento": "Política interna de Continuidad del Negocio (Banco Demo) (POL-CN-01 v1)",
+      "tipo": "politica_interna",
+      "estado": "derogado",
+      "ruta": "Artículo 3",
+      "pagina": 1,
+      "texto": "Artículo 3.- Frecuencia de pruebas Los planes de continuidad del negocio deberán probarse como mínimo una vez al año.",
+      "score": 0.9
+    },
+    {
+      "chunk_id": "int-proc-pruebas-bcp#articulo-2",
+      "doc_id": "int-proc-pruebas-bcp",
+      "documento": "Procedimiento de pruebas del plan de continuidad (Banco Demo) (PROC-CN-07)",
+      "tipo": "procedimiento_interno",
+      "estado": "vigente",
+      "ruta": "Artículo 2",
+      "pagina": 1,
+      "texto": "Artículo 2.- Periodicidad Las pruebas integrales del plan de continuidad de los procesos críticos se ejecutan una vez al año, en el mes de noviembre.",
+      "score": 0.7
+    },
+    {
+      "chunk_id": "int-pol-continuidad-v2#articulo-3",
+      "doc_id": "int-pol-continuidad-v2",
+      "documento": "Política interna de Continuidad del Negocio (Banco Demo) (POL-CN-01 v2)",
+      "tipo": "politica_interna",
+      "estado": "vigente",
+      "ruta": "Artículo 3",
+      "pagina": 1,
+      "texto": "Artículo 3.- Frecuencia de pruebas Los planes de continuidad del negocio de los procesos críticos deberán probarse como mínimo dos veces al año.",
+      "score": 1,
+      "reemplazo": true
+    }
+  ]
+}

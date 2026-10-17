@@ -1,0 +1,4 @@
+.env
+chunks.jsonl
+normativa-rag
+*.test

@@ -1,0 +1,86 @@
+[
+  {
+    "doc_id": "sbs-g139-2009",
+    "numero": "G-139-2009",
+    "titulo": "Circular SBS sobre gestión de la continuidad del negocio",
+    "tipo": "norma_sbs",
+    "archivo": "corpus/sbs-g139-2009.pdf",
+    "url": "",
+    "fecha": "",
+    "derogado_por": "sbs-877-2020"
+  },
+  {
+    "doc_id": "sbs-877-2020",
+    "numero": "877-2020",
+    "titulo": "Reglamento para la Gestión de la Continuidad del Negocio",
+    "tipo": "norma_sbs",
+    "archivo": "corpus/sbs-877-2020.pdf",
+    "url": "",
+    "fecha": "2020",
+    "vigente_desde": "2022-01-01",
+    "modificado_por": ["sbs-1536-2020"]
+  },
+  {
+    "doc_id": "sbs-1536-2020",
+    "numero": "1536-2020",
+    "titulo": "Modificación de la Res. SBS N° 877-2020 y de la Res. SBS N° 5570-2019",
+    "tipo": "norma_sbs",
+    "archivo": "corpus/sbs-1536-2020.pdf",
+    "url": "https://busquedas.elperuano.pe/dispositivo/NL/1867392-1",
+    "fecha": "2020-06-05"
+  },
+  {
+    "doc_id": "sbs-2116-2009",
+    "numero": "2116-2009",
+    "titulo": "Reglamento para la Gestión del Riesgo Operacional",
+    "tipo": "norma_sbs",
+    "archivo": "corpus/sbs-2116-2009.pdf",
+    "url": "",
+    "fecha": "2009",
+    "modificado_por": ["sbs-877-2020"]
+  },
+  {
+    "doc_id": "sbs-272-2017",
+    "numero": "272-2017",
+    "titulo": "Reglamento de Gobierno Corporativo y de la Gestión Integral de Riesgos",
+    "tipo": "norma_sbs",
+    "archivo": "corpus/sbs-272-2017.pdf",
+    "url": "",
+    "fecha": "2017",
+    "modificado_por": ["sbs-877-2020"]
+  },
+  {
+    "doc_id": "sbs-504-2021",
+    "numero": "504-2021",
+    "titulo": "Reglamento para la Gestión de la Seguridad de la Información y la Ciberseguridad",
+    "tipo": "norma_sbs",
+    "archivo": "corpus/sbs-504-2021.pdf",
+    "url": "",
+    "fecha": "2021"
+  },
+  {
+    "doc_id": "int-pol-continuidad-v1",
+    "numero": "POL-CN-01 v1",
+    "titulo": "Política interna de Continuidad del Negocio (Banco Demo)",
+    "tipo": "politica_interna",
+    "archivo": "corpus/int-pol-continuidad-v1.md",
+    "fecha": "2021-03-01",
+    "derogado_por": "int-pol-continuidad-v2"
+  },
+  {
+    "doc_id": "int-pol-continuidad-v2",
+    "numero": "POL-CN-01 v2",
+    "titulo": "Política interna de Continuidad del Negocio (Banco Demo)",
+    "tipo": "politica_interna",
+    "archivo": "corpus/int-pol-continuidad-v2.md",
+    "fecha": "2024-02-01"
+  },
+  {
+    "doc_id": "int-proc-pruebas-bcp",
+    "numero": "PROC-CN-07",
+    "titulo": "Procedimiento de pruebas del plan de continuidad (Banco Demo)",
+    "tipo": "procedimiento_interno",
+    "archivo": "corpus/int-proc-pruebas-bcp.md",
+    "fecha": "2024-06-15"
+  }
+]

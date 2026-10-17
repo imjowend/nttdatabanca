@@ -1,0 +1,10 @@
+[
+  {"pregunta": "¿Cada cuánto se deben probar los planes de continuidad de los procesos críticos?", "esperado": ["int-pol-continuidad-v2#articulo-3", "int-proc-pruebas-bcp#articulo-2"]},
+  {"pregunta": "¿Cuál es el RTO máximo para procesos críticos?", "esperado": ["int-pol-continuidad-v2#articulo-4"]},
+  {"pregunta": "¿En qué plazo se reportan los resultados de las pruebas de continuidad al Comité de Riesgos?", "esperado": ["int-pol-continuidad-v2#articulo-3", "int-proc-pruebas-bcp#articulo-3"]},
+  {"pregunta": "¿Quién es responsable de mantener actualizado el plan de continuidad?", "esperado": ["int-pol-continuidad-v2#articulo-2"]},
+  {"pregunta": "¿La Circular G-139-2009 sigue vigente?", "esperado": ["sbs-g139-2009", "sbs-877-2020"]},
+  {"pregunta": "¿Qué cambió la Resolución SBS 1536-2020?", "esperado": ["sbs-1536-2020"]},
+  {"pregunta": "¿Qué norma regula la gestión de la seguridad de la información y la ciberseguridad?", "esperado": ["sbs-504-2021"]},
+  {"pregunta": "¿Qué reglamento regula la gestión del riesgo operacional?", "esperado": ["sbs-2116-2009"]}
+]
