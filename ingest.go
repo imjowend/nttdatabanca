@@ -216,7 +216,11 @@ func runIngest(ctx context.Context, cfg Config, reg *Registry, reset, dry bool) 
 		return nil
 	}
 
-	jina, qd, err := clientes(cfg)
+	emb, err := nuevoEmbedder(cfg)
+	if err != nil {
+		return err
+	}
+	qd, err := nuevoQdrant(cfg)
 	if err != nil {
 		return err
 	}
@@ -230,14 +234,15 @@ func runIngest(ctx context.Context, cfg Config, reg *Registry, reset, dry bool) 
 	}
 	avgdl := float64(total) / float64(len(chunks))
 
-	vecs, err := jina.Embed(ctx, textos, "retrieval.passage")
+	vecs, err := emb.EmbedDocs(ctx, textos)
 	if err != nil {
 		return err
 	}
-	if reset {
-		if err := qd.Recrear(ctx, cfg.Dim); err != nil {
-			return fmt.Errorf("crear colección: %w", err)
-		}
+	if len(vecs) != len(chunks) || len(vecs[0]) == 0 {
+		return fmt.Errorf("el embedder devolvió %d vectores para %d chunks", len(vecs), len(chunks))
+	}
+	if err := qd.Asegurar(ctx, len(vecs[0]), reset); err != nil {
+		return fmt.Errorf("preparar colección: %w", err)
 	}
 	pts := make([]Punto, len(chunks))
 	for i, c := range chunks {

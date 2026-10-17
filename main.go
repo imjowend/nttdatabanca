@@ -1,6 +1,7 @@
 // normativa-rag: RAG sobre normativa SBS + políticas internas.
-// Solo librería estándar de Go. Dependencias externas: Qdrant Cloud, Jina API,
-// un LLM con API compatible con OpenAI, y `pdftotext` (poppler-utils) para la ingesta.
+// Solo librería estándar de Go. Dependencias externas: Qdrant Cloud, Voyage AI
+// (o Jina), un LLM con API compatible con OpenAI (Gemini por defecto), y
+// `pdftotext` (poppler-utils) para la ingesta.
 package main
 
 import (
@@ -9,16 +10,20 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 )
 
 type Config struct {
-	QdrantURL, QdrantKey, Coleccion  string
-	JinaKey, EmbedModel, RerankModel string
-	Dim                              int
-	LLMBase, LLMKey, LLMModel        string
-	RegistryPath, Addr, CORSOrigin   string
+	EmbProvider, RerankProvider                    string // jina | voyage
+	QdrantURL, QdrantKey, Coleccion                string
+	VoyageKey, VoyageEmbedModel, VoyageRerankModel string
+	JinaKey, EmbedModel, RerankModel               string
+	Dim                                            int // solo Jina (parámetro "dimensions")
+	LLMBase, LLMKey, LLMModel, LLMEffort           string
+	PriceIn, PriceOut                              float64 // USD por millón de tokens
+	RegistryPath, Addr, CORSOrigin                 string
 }
 
 func env(k, def string) string {
@@ -28,23 +33,65 @@ func env(k, def string) string {
 	return def
 }
 
-func cargarConfig() Config {
-	dim, _ := strconv.Atoi(env("EMBED_DIM", "1024"))
-	return Config{
-		QdrantURL:    env("QDRANT_URL", ""), // ej: https://xxxx.us-east4-0.gcp.cloud.qdrant.io:6333
-		QdrantKey:    env("QDRANT_API_KEY", ""),
-		Coleccion:    env("QDRANT_COLLECTION", "normativa"),
-		JinaKey:      env("JINA_API_KEY", ""),
-		EmbedModel:   env("JINA_EMBED_MODEL", "jina-embeddings-v5-text-small"),
-		RerankModel:  env("JINA_RERANK_MODEL", "jina-reranker-v3.5"),
-		Dim:          dim,
-		LLMBase:      env("LLM_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/openai"),
-		LLMKey:       env("LLM_API_KEY", ""),
-		LLMModel:     env("LLM_MODEL", ""),
-		RegistryPath: env("REGISTRY_PATH", "registry.json"),
-		Addr:         env("ADDR", ":8080"),
-		CORSOrigin:   env("CORS_ORIGIN", "*"),
+func envFloat(k string, def float64) (float64, error) {
+	s := env(k, "")
+	if s == "" {
+		return def, nil
 	}
+	f, err := strconv.ParseFloat(s, 64)
+	if err != nil || f < 0 {
+		return 0, fmt.Errorf("%s=%q no es un número válido", k, s)
+	}
+	return f, nil
+}
+
+func cargarConfig() (Config, error) {
+	dim, _ := strconv.Atoi(env("EMBED_DIM", "1024"))
+	emb := strings.ToLower(env("EMB_PROVIDER", "voyage"))
+	cfg := Config{
+		EmbProvider:       emb,
+		RerankProvider:    strings.ToLower(env("RERANK_PROVIDER", "voyage")),
+		QdrantURL:         env("QDRANT_URL", ""), // ej: https://xxxx.us-east4-0.gcp.cloud.qdrant.io:6333
+		QdrantKey:         env("QDRANT_API_KEY", ""),
+		Coleccion:         env("QDRANT_COLLECTION", "normativa_"+emb),
+		VoyageKey:         env("VOYAGE_API_KEY", ""),
+		VoyageEmbedModel:  env("VOYAGE_EMBED_MODEL", "voyage-4"),
+		VoyageRerankModel: env("VOYAGE_RERANK_MODEL", "rerank-2.5"),
+		JinaKey:           env("JINA_API_KEY", ""),
+		EmbedModel:        env("JINA_EMBED_MODEL", "jina-embeddings-v5-text-small"),
+		RerankModel:       env("JINA_RERANK_MODEL", "jina-reranker-v3.5"),
+		Dim:               dim,
+		LLMBase:           env("LLM_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/openai/"),
+		LLMKey:            env("LLM_API_KEY", ""),
+		LLMModel:          env("LLM_MODEL", "gemini-3.8-flash"),
+		LLMEffort:         strings.ToLower(env("LLM_REASONING_EFFORT", "low")),
+		RegistryPath:      env("REGISTRY_PATH", "registry.json"),
+		Addr:              env("ADDR", ":8080"),
+		CORSOrigin:        env("CORS_ORIGIN", "*"),
+	}
+	var err error
+	if cfg.PriceIn, err = envFloat("LLM_PRICE_IN", 0.75); err != nil {
+		return cfg, err
+	}
+	if cfg.PriceOut, err = envFloat("LLM_PRICE_OUT", 3.75); err != nil {
+		return cfg, err
+	}
+	return cfg, nil
+}
+
+var reGeminiVersion = regexp.MustCompile(`^gemini-(\d+)`)
+
+// validarEffort: los modelos Gemini 3.x en adelante no permiten apagar el thinking.
+func validarEffort(model, effort string) error {
+	if effort != "none" {
+		return nil
+	}
+	if m := reGeminiVersion.FindStringSubmatch(strings.ToLower(model)); m != nil {
+		if v, _ := strconv.Atoi(m[1]); v >= 3 {
+			return fmt.Errorf("LLM_REASONING_EFFORT=none no está soportado por %s (usá low, medium o high)", model)
+		}
+	}
+	return nil
 }
 
 func faltantes(pares ...string) error {
@@ -60,25 +107,45 @@ func faltantes(pares ...string) error {
 	return nil
 }
 
-func clientes(cfg Config) (*Jina, *Qdrant, error) {
-	if err := faltantes("QDRANT_URL", cfg.QdrantURL, "JINA_API_KEY", cfg.JinaKey); err != nil {
-		return nil, nil, err
+func nuevoQdrant(cfg Config) (*Qdrant, error) {
+	if err := faltantes("QDRANT_URL", cfg.QdrantURL); err != nil {
+		return nil, err
 	}
-	return &Jina{key: cfg.JinaKey, embedModel: cfg.EmbedModel, rerankModel: cfg.RerankModel, dim: cfg.Dim},
-		&Qdrant{base: cfg.QdrantURL, key: cfg.QdrantKey, coll: cfg.Coleccion}, nil
+	return &Qdrant{base: cfg.QdrantURL, key: cfg.QdrantKey, coll: cfg.Coleccion}, nil
 }
 
-func nuevoRAG(cfg Config, reg *Registry, conLLM bool) (*RAG, error) {
-	j, q, err := clientes(cfg)
+func nuevoLLM(cfg Config) (*LLM, error) {
+	if err := faltantes("LLM_API_KEY", cfg.LLMKey, "LLM_MODEL", cfg.LLMModel); err != nil {
+		return nil, err
+	}
+	if err := validarEffort(cfg.LLMModel, cfg.LLMEffort); err != nil {
+		return nil, err
+	}
+	return &LLM{base: cfg.LLMBase, key: cfg.LLMKey, model: cfg.LLMModel, effort: cfg.LLMEffort,
+		priceIn: cfg.PriceIn, priceOut: cfg.PriceOut}, nil
+}
+
+// nuevoRAG valida solo lo que se va a usar: eval -norerank no pide el reranker
+// y eval no pide el LLM.
+func nuevoRAG(cfg Config, reg *Registry, conLLM, conRerank bool) (*RAG, error) {
+	emb, err := nuevoEmbedder(cfg)
 	if err != nil {
 		return nil, err
 	}
-	r := &RAG{reg: reg, jina: j, qd: q}
-	if conLLM {
-		if err := faltantes("LLM_API_KEY", cfg.LLMKey, "LLM_MODEL", cfg.LLMModel); err != nil {
+	q, err := nuevoQdrant(cfg)
+	if err != nil {
+		return nil, err
+	}
+	r := &RAG{reg: reg, emb: emb, qd: q}
+	if conRerank {
+		if r.rr, err = nuevoReranker(cfg); err != nil {
 			return nil, err
 		}
-		r.llm = &LLM{base: cfg.LLMBase, key: cfg.LLMKey, model: cfg.LLMModel}
+	}
+	if conLLM {
+		if r.llm, err = nuevoLLM(cfg); err != nil {
+			return nil, err
+		}
 	}
 	return r, nil
 }
@@ -98,7 +165,10 @@ func main() {
 		uso()
 	}
 	cmd, args := os.Args[1], os.Args[2:]
-	cfg := cargarConfig()
+	cfg, err := cargarConfig()
+	if err != nil {
+		log.Fatal(err)
+	}
 	reg, err := LoadRegistry(cfg.RegistryPath)
 	if err != nil {
 		log.Fatalf("registro de vigencia: %v", err)
@@ -119,12 +189,12 @@ func main() {
 		norerank := fs.Bool("norerank", false, "evaluar sin reranker (para comparar)")
 		fs.Parse(args)
 		var rag *RAG
-		if rag, err = nuevoRAG(cfg, reg, false); err == nil {
+		if rag, err = nuevoRAG(cfg, reg, false, !*norerank); err == nil {
 			err = runEval(ctx, rag, *file, *k, !*norerank)
 		}
 	case "serve":
 		var rag *RAG
-		if rag, err = nuevoRAG(cfg, reg, true); err == nil {
+		if rag, err = nuevoRAG(cfg, reg, true, true); err == nil {
 			err = runServe(cfg, rag)
 		}
 	default:

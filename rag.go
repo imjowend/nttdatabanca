@@ -3,15 +3,62 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log"
+	"regexp"
 	"strings"
+	"sync"
+	"unicode/utf8"
 )
 
 type RAG struct {
-	reg  *Registry
+	reg *Registry
+	emb Embedder
+	rr  Reranker // nil si no se va a rerankear (eval -norerank)
+	qd  *Qdrant
+	llm *LLM
+
+	// jina: atajo de compatibilidad (tests previos al refactor). Si emb/rr son
+	// nil y jina no, se usa como Embedder/Reranker. El código nuevo usa emb/rr.
 	jina *Jina
-	qd   *Qdrant
-	llm  *LLM
+
+	dimMu sync.Mutex
+	dimOK int // dimensión ya verificada contra la colección (0 = sin verificar)
+}
+
+func (r *RAG) embedder() Embedder {
+	if r.emb == nil && r.jina != nil {
+		return r.jina
+	}
+	return r.emb
+}
+
+func (r *RAG) reranker() Reranker {
+	if r.rr == nil && r.jina != nil {
+		return r.jina
+	}
+	return r.rr
+}
+
+// verificarDim compara (una vez) la dimensión del embedding de la query con la
+// de la colección. Si la colección no existe no cachea nada: la query va a
+// fallar con un mensaje claro.
+func (r *RAG) verificarDim(ctx context.Context, n int) error {
+	r.dimMu.Lock()
+	defer r.dimMu.Unlock()
+	if r.dimOK == n {
+		return nil
+	}
+	dim, existe, err := r.qd.Info(ctx)
+	if err != nil || !existe {
+		return err
+	}
+	if dim != n {
+		return errDim(r.qd.coll, dim, n)
+	}
+	r.dimOK = n
+	return nil
 }
 
 type Resultado struct {
@@ -51,25 +98,31 @@ func (r *RAG) aResultado(h Hit) Resultado {
 	return res
 }
 
-// Search: 1 embedding (Jina) + 1 query híbrida (Qdrant) + 1 rerank (Jina).
+// Search: 1 embedding + 1 query híbrida (Qdrant) + 1 rerank (proveedor configurado).
 // Los derogados NO se filtran: se devuelven marcados y se trae su reemplazo.
 func (r *RAG) Search(ctx context.Context, q string, k int, rerank bool) (*ResultadoBusqueda, error) {
-	vecs, err := r.jina.Embed(ctx, []string{q}, "retrieval.query")
+	vec, err := r.embedder().EmbedQuery(ctx, q)
 	if err != nil {
 		return nil, err
 	}
-	vec := vecs[0]
+	if err := r.verificarDim(ctx, len(vec)); err != nil {
+		return nil, err
+	}
 	hits, err := r.qd.Hibrida(ctx, vec, bm25Query(tokenizar(q)), r.reg.DocIDsDesdeTexto(q), candidatos)
 	if err != nil {
 		return nil, err
 	}
 
 	if rerank && len(hits) > 0 {
+		rrk := r.reranker()
+		if rrk == nil {
+			return nil, errors.New("rerank pedido pero no hay Reranker configurado")
+		}
 		docs := make([]string, len(hits))
 		for i, h := range hits {
 			docs[i] = recortar(conEncabezado(r.reg, h.Payload), 4000)
 		}
-		rr, err := r.jina.Rerank(ctx, q, docs, min(k, len(hits)))
+		rr, err := rrk.Rerank(ctx, q, docs, min(k, len(hits)))
 		if err != nil {
 			return nil, err
 		}
@@ -214,13 +267,23 @@ func (r *RAG) Ask(ctx context.Context, pregunta string) (*Respuesta, error) {
 		out.Respuesta = "No encontré fragmentos relevantes en el corpus."
 		return out, nil
 	}
-	raw, err := r.llm.ChatJSON(ctx, promptSistema, r.armarPrompt(pregunta, sr.Resultados))
+	msgs := []Mensaje{{Role: "system", Content: promptSistema}, {Role: "user", Content: r.armarPrompt(pregunta, sr.Resultados)}}
+	raw, err := r.llm.Chat(ctx, msgs)
 	if err != nil {
 		return nil, err
 	}
 	var s salidaLLM
 	if err := parsearJSONLaxo(raw, &s); err != nil {
-		return nil, fmt.Errorf("el LLM no devolvió JSON válido: %w", err)
+		// Un solo reintento, con recordatorio explícito (cada llamada cuesta plata).
+		log.Printf("ask: el LLM no devolvió JSON válido (%v); reintento una vez", err)
+		msgs = append(msgs, Mensaje{Role: "assistant", Content: raw}, Mensaje{Role: "user", Content: recordatorioJSON})
+		if raw, err = r.llm.Chat(ctx, msgs); err != nil {
+			return nil, err
+		}
+		s = salidaLLM{}
+		if err := parsearJSONLaxo(raw, &s); err != nil {
+			return nil, fmt.Errorf("el LLM no devolvió JSON válido (tras 1 reintento): %w", err)
+		}
 	}
 	out.Respuesta, out.SinRespuesta = s.Respuesta, s.SinRespuesta
 
@@ -228,14 +291,25 @@ func (r *RAG) Ask(ctx context.Context, pregunta string) (*Respuesta, error) {
 	for _, x := range sr.Resultados {
 		porID[x.ChunkID] = x
 	}
+	var descartadas []string
 	for _, c := range s.Citas {
 		x, ok := porID[c.ChunkID]
 		if !ok || !citaValida(x.Texto, c.CitaTextual) {
 			out.CitasDescartadas++ // cita alucinada o parafraseada: afuera
+			motivo := "no coincide con el chunk"
+			if !ok {
+				motivo = "chunk_id inexistente"
+			}
+			descartadas = append(descartadas, fmt.Sprintf("[%s] %q (%s)", c.ChunkID, recortar(c.CitaTextual, 80), motivo))
 			continue
 		}
+		// Se devuelve la cita ORIGINAL; la normalización es solo para comparar.
 		out.Citas = append(out.Citas, Cita{ChunkID: c.ChunkID, CitaTextual: c.CitaTextual,
 			Documento: x.Documento, Ruta: x.Ruta, Pagina: x.Pagina, Estado: x.Estado, URL: x.URL})
+	}
+	log.Printf("ask: citas válidas=%d descartadas=%d", len(out.Citas), out.CitasDescartadas)
+	for _, d := range descartadas {
+		log.Printf("  cita descartada: %s", d)
 	}
 	for _, c := range s.Contradicciones {
 		a, okA := porID[c.ChunkA]
@@ -250,6 +324,9 @@ func (r *RAG) Ask(ctx context.Context, pregunta string) (*Respuesta, error) {
 	return out, nil
 }
 
+const recordatorioJSON = "Tu respuesta anterior no era JSON válido. Devolvé SOLO un objeto JSON válido con la forma " +
+	"indicada en las instrucciones, sin texto adicional ni bloques de markdown."
+
 func parsearJSONLaxo(raw string, v any) error {
 	s := strings.TrimSpace(raw)
 	if i, j := strings.Index(s, "{"), strings.LastIndex(s, "}"); i >= 0 && j > i {
@@ -258,28 +335,53 @@ func parsearJSONLaxo(raw string, v any) error {
 	return json.Unmarshal([]byte(s), v)
 }
 
-var comillas = strings.NewReplacer("“", `"`, "”", `"`, "«", `"`, "»", `"`, "‘", "'", "’", "'", "…", "...")
+var (
+	comillas = strings.NewReplacer("“", `"`, "”", `"`, "«", `"`, "»", `"`, "‘", "'", "’", "'", "…", "...")
+	// "regla-\n   mento" → "reglamento" (palabra cortada con guion al final de línea)
+	reGuionCorte = regexp.MustCompile(`-\n\s*`)
+)
 
-func normalizar(s string) string {
-	return strings.Join(strings.Fields(sinAcentos(comillas.Replace(s))), " ")
+// normCita: quita guiones de corte de línea, unifica comillas tipográficas,
+// colapsa todo whitespace a un espacio, TrimSpace y ToLower.
+func normCita(s string) string {
+	s = reGuionCorte.ReplaceAllString(s, "")
+	s = comillas.Replace(s)
+	s = strings.Join(strings.Fields(s), " ")
+	return strings.ToLower(strings.TrimSpace(s))
 }
 
-// citaValida verifica que la cita exista literalmente en el chunk (tolerando
-// mayúsculas, acentos, espacios y elipsis "..." entre fragmentos en orden).
+// normalizar = normCita + sin acentos (el LLM a veces los pierde o los agrega).
+func normalizar(s string) string { return sinAcentos(normCita(s)) }
+
+const (
+	minCitaChars  = 20 // la cita completa (suma de tramos) debe tener al menos esto
+	minTramoChars = 12 // con "...", cada tramo debe tener al menos esto
+)
+
+// citaValida verifica que la cita exista literalmente en el chunk, tolerando
+// mayúsculas, acentos, comillas tipográficas, espacios y guiones de corte de
+// línea. Con "..." la cita se parte en tramos: cada uno de ≥12 caracteres y
+// todos en orden dentro del MISMO chunk.
 func citaValida(fuente, cita string) bool {
 	f := normalizar(fuente)
-	pos, total := 0, 0
+	var tramos []string
 	for _, p := range strings.Split(normalizar(cita), "...") {
-		p = strings.Trim(p, ` .,;:"'`)
-		if p == "" {
-			continue
+		if p = strings.Trim(p, ` .,;:"'`); p != "" {
+			tramos = append(tramos, p)
+		}
+	}
+	pos, total := 0, 0
+	for _, p := range tramos {
+		n := utf8.RuneCountInString(p)
+		if len(tramos) > 1 && n < minTramoChars {
+			return false
 		}
 		i := strings.Index(f[pos:], p)
 		if i < 0 {
 			return false
 		}
 		pos += i + len(p)
-		total += len(p)
+		total += n
 	}
-	return total >= 20
+	return total >= minCitaChars
 }
