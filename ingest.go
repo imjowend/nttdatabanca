@@ -8,7 +8,6 @@ import (
 	"hash/fnv"
 	"log"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -21,20 +20,71 @@ type Chunk struct {
 	ChunkID string `json:"chunk_id"`
 	DocID   string `json:"doc_id"`
 	Ruta    string `json:"ruta"`
+	Seccion string `json:"seccion,omitempty"` // TÍTULO / CAPÍTULO que lo contiene
 	Pagina  int    `json:"pagina"`
 	Texto   string `json:"texto"`
 }
 
 const maxChunkChars = 3000 // ~750 tokens
 
+// ordinal: "Primero", "Décimo", "Único"... Es una lista cerrada para que
+// encabezados de tabla como "Artículo PGR-001" no se tomen por artículos.
+const ordinal = `(?:primer[oa]?|segund[oa]|tercer[oa]?|cuart[oa]|quint[oa]|sext[oa]|s[ée]ptim[oa]|octav[oa]|noven[oa]|` +
+	`d[ée]cim[oa]|und[ée]cim[oa]|duod[ée]cim[oa]|vig[ée]sim[oa]|[úu]nic[oa])`
+
 var (
 	// "Artículo 5.-", "Artículo 5°.-", "Artículo Primero.-", "Artículo Décimo Segundo.-",
 	// "ARTÍCULO 4.-", y "## Artículo 3.-" en los .md sintéticos. Exige el guion para
 	// no cortar en referencias del tipo "conforme al artículo 5 del Reglamento".
-	reArticulo = regexp.MustCompile(`(?im)^[ \t]*(?:#+[ \t]*)?art[íi]culo[ \t]+([0-9]+[°º]?|[a-záéíóúñ]+(?:[ \t]+[a-záéíóúñ]+)?)[ \t]*\.?[ \t]*[-–—]`)
+	reArticulo = regexp.MustCompile(`(?im)^[ \t]*(?:#+[ \t]*)?art[íi]culo[ \t]+([0-9]+[°º]?|` + ordinal + `(?:[ \t]+` + ordinal + `)?)[ \t]*\.?[ \t]*[-–—]`)
+	// Encabezados que también cortan chunks (ver limites).
+	reAnexo    = regexp.MustCompile(`(?m)^[ \t]*ANEXO[ \t]+([A-Z0-9]+)[ \t]*[-–—].*$`)
+	reTitulo   = regexp.MustCompile(`(?m)^[ \t]*(?:T[ÍI]TULO|CAP[ÍI]TULO)[ \t]+[IVXLC0-9]+[ \t]*[-–—].*$`)
+	reMarcador = regexp.MustCompile(`(?m)^[ \t]*(CONSIDERANDO|SE RESUELVE|DISPOSICI[ÓO]N(?:ES)? (?:FINAL|COMPLEMENTARIA|TRANSITORIA)(?:E?S)?|Control de cambios)[ \t:]*$`)
 	// "regla-\nmento" → "reglamento"
 	reGuion = regexp.MustCompile(`(\p{L})-\n[ \t]*(\p{Ll})`)
 )
+
+type tipoLimite int
+
+const (
+	limChunk    tipoLimite = iota // abre un chunk con esta ruta
+	limSeccion                    // TÍTULO/CAPÍTULO: cambia la sección, no genera chunk
+	limDescarte                   // "SE RESUELVE", "Control de cambios": lo que sigue no se indexa
+)
+
+type limite struct {
+	ini, finCab int // inicio del encabezado y fin de su línea
+	tipo        tipoLimite
+	ruta        string
+	conCab      bool // el chunk incluye la línea del encabezado
+}
+
+// limites ubica todos los cortes del texto, en orden.
+func limites(text string) []limite {
+	var ls []limite
+	for _, l := range reArticulo.FindAllStringSubmatchIndex(text, -1) {
+		ls = append(ls, limite{l[0], l[1], limChunk, "Artículo " + nombreArticulo(text[l[2]:l[3]]), true})
+	}
+	for _, l := range reAnexo.FindAllStringSubmatchIndex(text, -1) {
+		ls = append(ls, limite{l[0], l[1], limChunk, "Anexo " + text[l[2]:l[3]], true})
+	}
+	for _, l := range reTitulo.FindAllStringIndex(text, -1) {
+		ls = append(ls, limite{l[0], l[1], limSeccion, oracion(strings.TrimSpace(text[l[0]:l[1]])), false})
+	}
+	for _, l := range reMarcador.FindAllStringSubmatchIndex(text, -1) {
+		switch m := text[l[2]:l[3]]; {
+		case m == "CONSIDERANDO":
+			ls = append(ls, limite{l[0], l[1], limChunk, "Considerando", false})
+		case strings.HasPrefix(m, "DISPOSICI"):
+			ls = append(ls, limite{l[0], l[1], limChunk, oracion(m), false})
+		default:
+			ls = append(ls, limite{l[0], l[1], limDescarte, "", false})
+		}
+	}
+	sort.Slice(ls, func(i, j int) bool { return ls[i].ini < ls[j].ini })
+	return ls
+}
 
 func leerPaginas(path string) ([]string, error) {
 	switch strings.ToLower(filepath.Ext(path)) {
@@ -45,17 +95,7 @@ func leerPaginas(path string) ([]string, error) {
 		}
 		return strings.Split(string(b), "\f"), nil
 	case ".pdf":
-		// Sin -layout: El Peruano publica a varias columnas y el modo por defecto
-		// respeta mejor el orden de lectura. pdftotext separa páginas con \f.
-		out, err := exec.Command("pdftotext", "-enc", "UTF-8", path, "-").Output()
-		if err != nil {
-			return nil, fmt.Errorf("pdftotext %s: %w (¿está instalado poppler-utils?)", path, err)
-		}
-		pages := strings.Split(string(out), "\f")
-		if n := len(pages); n > 1 && strings.TrimSpace(pages[n-1]) == "" {
-			pages = pages[:n-1]
-		}
-		return pages, nil
+		return pdftotext(path, false)
 	}
 	return nil, fmt.Errorf("formato no soportado: %s", path)
 }
@@ -74,23 +114,38 @@ func chunkear(docID string, pages []string) []Chunk {
 	}
 
 	type tramo struct {
-		ruta     string
-		ini, fin int
+		ruta, seccion string
+		ini, fin      int
 	}
 	var tramos []tramo
-	locs := reArticulo.FindAllStringSubmatchIndex(text, -1)
-	if len(locs) == 0 {
-		tramos = append(tramos, tramo{"Documento", 0, len(text)})
-	} else {
-		if pre := strings.TrimSpace(text[:locs[0][0]]); len(pre) > 200 {
-			tramos = append(tramos, tramo{"Preámbulo", 0, locs[0][0]})
+	ls := limites(text)
+	if len(ls) == 0 {
+		if strings.TrimSpace(text) != "" {
+			tramos = append(tramos, tramo{"Documento", "", 0, len(text)})
 		}
-		for i, l := range locs {
+	} else {
+		if pre := strings.TrimSpace(text[:ls[0].ini]); len(pre) > 200 {
+			tramos = append(tramos, tramo{"Preámbulo", "", 0, ls[0].ini})
+		}
+		seccion := ""
+		for i, l := range ls {
 			fin := len(text)
-			if i+1 < len(locs) {
-				fin = locs[i+1][0]
+			if i+1 < len(ls) {
+				fin = ls[i+1].ini
 			}
-			tramos = append(tramos, tramo{"Artículo " + nombreArticulo(text[l[2]:l[3]]), l[0], fin})
+			switch l.tipo {
+			case limSeccion:
+				seccion = l.ruta
+			case limChunk:
+				if strings.HasPrefix(l.ruta, "Anexo") {
+					seccion = ""
+				}
+				ini := l.finCab
+				if l.conCab {
+					ini = l.ini
+				}
+				tramos = append(tramos, tramo{l.ruta, seccion, ini, fin})
+			}
 		}
 	}
 
@@ -112,7 +167,7 @@ func chunkear(docID string, pages []string) []Chunk {
 			if n := usados[id]; n > 1 { // ej: un reglamento anexo con su propio "Artículo 1"
 				id = fmt.Sprintf("%s-%d", id, n)
 			}
-			chunks = append(chunks, Chunk{ChunkID: id, DocID: docID, Ruta: ruta, Pagina: pagina(p[0]), Texto: texto})
+			chunks = append(chunks, Chunk{ChunkID: id, DocID: docID, Ruta: ruta, Seccion: t.seccion, Pagina: pagina(p[0]), Texto: texto})
 		}
 	}
 	return chunks
@@ -175,6 +230,9 @@ func conEncabezado(reg *Registry, c Chunk) string {
 	if d, ok := reg.Get(c.DocID); ok {
 		cab = d.Label()
 	}
+	if c.Seccion != "" {
+		cab += " — " + c.Seccion
+	}
 	return cab + " — " + c.Ruta + "\n" + c.Texto
 }
 
@@ -184,14 +242,48 @@ func idPunto(chunkID string) uint64 {
 	return h.Sum64()
 }
 
+// idDoc: el doc_id es el código en minúsculas ("PRC-001" → "prc-001").
+func idDoc(codigo string) string { return strings.ToLower(strings.TrimSpace(codigo)) }
+
+// chunksDeArchivo chunkea un archivo del corpus. Un PDF puede traer varios
+// documentos (principal + anexos con su propio bloque de metadatos); un .md es
+// un solo documento, el de docID.
+func chunksDeArchivo(path, docID string) (map[string][]Chunk, []string, error) {
+	por := map[string][]Chunk{}
+	if strings.ToLower(filepath.Ext(path)) != ".pdf" {
+		pages, err := leerPaginas(path)
+		if err != nil {
+			return nil, nil, err
+		}
+		por[docID] = chunkear(docID, pages)
+		return por, []string{docID}, nil
+	}
+	a, err := extraerPDF(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	var orden []string
+	for _, d := range a.Docs {
+		id := idDoc(d.Codigo)
+		por[id] = chunkear(id, d.Paginas)
+		orden = append(orden, id)
+	}
+	return por, orden, nil
+}
+
 func runIngest(ctx context.Context, cfg Config, reg *Registry, reset, dry bool) error {
 	base := filepath.Dir(cfg.RegistryPath)
 	var chunks []Chunk
+	vistos := map[string]bool{}
 	for _, d := range reg.Docs() {
 		if d.Archivo == "" {
 			log.Printf("· %s: sin archivo, se saltea", d.ID)
 			continue
 		}
+		if vistos[d.Archivo] {
+			continue // ya procesado junto con su documento padre
+		}
+		vistos[d.Archivo] = true
 		path := d.Archivo
 		if !filepath.IsAbs(path) {
 			path = filepath.Join(base, path)
@@ -200,13 +292,18 @@ func runIngest(ctx context.Context, cfg Config, reg *Registry, reset, dry bool) 
 			log.Printf("! %-28s no encuentro %s, se saltea", d.ID, path)
 			continue
 		}
-		pages, err := leerPaginas(path)
+		por, orden, err := chunksDeArchivo(path, d.ID)
 		if err != nil {
 			return err
 		}
-		cs := chunkear(d.ID, pages)
-		log.Printf("· %-28s %3d págs → %3d chunks", d.ID, len(pages), len(cs))
-		chunks = append(chunks, cs...)
+		for _, id := range orden {
+			if _, ok := reg.Get(id); !ok {
+				log.Printf("! %-28s está en %s pero no en el registro (corré `registro`), se saltea", id, d.Archivo)
+				continue
+			}
+			log.Printf("· %-28s → %3d chunks", id, len(por[id]))
+			chunks = append(chunks, por[id]...)
+		}
 	}
 	if err := escribirJSONL("chunks.jsonl", chunks); err != nil {
 		return err

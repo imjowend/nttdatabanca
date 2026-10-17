@@ -18,7 +18,7 @@ RUN apk add --no-cache poppler-utils ca-certificates \
  && mkdir -p /app/out && chown app /app/out
 WORKDIR /app
 COPY --from=build /out/normativa-rag /app/normativa-rag
-COPY registry.json evals.json ./
+COPY registry.json registry.overrides.json evals.json ./
 COPY corpus/ ./corpus/
 USER 65532
 # chunks.jsonl se escribe en el directorio de trabajo.

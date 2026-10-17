@@ -3,12 +3,12 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log"
 	"regexp"
 	"strings"
 	"sync"
+	"time"
 	"unicode/utf8"
 )
 
@@ -18,27 +18,10 @@ type RAG struct {
 	rr  Reranker // nil si no se va a rerankear (eval -norerank)
 	qd  *Qdrant
 	llm *LLM
-
-	// jina: atajo de compatibilidad (tests previos al refactor). Si emb/rr son
-	// nil y jina no, se usa como Embedder/Reranker. El código nuevo usa emb/rr.
-	jina *Jina
+	hoy time.Time // fecha de referencia (FECHA_REFERENCIA u hoy)
 
 	dimMu sync.Mutex
 	dimOK int // dimensión ya verificada contra la colección (0 = sin verificar)
-}
-
-func (r *RAG) embedder() Embedder {
-	if r.emb == nil && r.jina != nil {
-		return r.jina
-	}
-	return r.emb
-}
-
-func (r *RAG) reranker() Reranker {
-	if r.rr == nil && r.jina != nil {
-		return r.jina
-	}
-	return r.rr
 }
 
 // verificarDim compara (una vez) la dimensión del embedding de la query con la
@@ -61,31 +44,50 @@ func (r *RAG) verificarDim(ctx context.Context, n int) error {
 	return nil
 }
 
+func (r *RAG) referencia() time.Time {
+	if r.hoy.IsZero() {
+		return dia(time.Now())
+	}
+	return r.hoy
+}
+
 type Resultado struct {
 	ChunkID   string  `json:"chunk_id"`
 	DocID     string  `json:"doc_id"`
 	Documento string  `json:"documento"`
 	Tipo      string  `json:"tipo"`
-	Estado    string  `json:"estado"`
+	Estado    string  `json:"estado"`   // en la fecha de consulta
+	Vigencia  string  `json:"vigencia"` // "01/07/2025 – indefinida"
 	Ruta      string  `json:"ruta"`
+	Seccion   string  `json:"seccion,omitempty"`
 	Pagina    int     `json:"pagina"`
 	URL       string  `json:"url,omitempty"`
 	Texto     string  `json:"texto"`
 	Score     float64 `json:"score"`
-	Reemplazo bool    `json:"reemplazo,omitempty"` // agregado porque reemplaza a un derogado
+	// Motivo: por qué se agregó un fragmento que no vino del ranking
+	// (reemplazo | modificacion | excepcion | definicion). Su score es 0.
+	Motivo string `json:"motivo,omitempty"`
+}
+
+func (x Resultado) chunk() Chunk {
+	return Chunk{ChunkID: x.ChunkID, DocID: x.DocID, Ruta: x.Ruta, Seccion: x.Seccion, Pagina: x.Pagina, Texto: x.Texto}
 }
 
 type ResultadoBusqueda struct {
-	Resultados []Resultado `json:"resultados"`
-	Alertas    []Alerta    `json:"alertas"`
+	FechaConsulta string      `json:"fecha_consulta"`
+	Resultados    []Resultado `json:"resultados"`
+	Alertas       []Alerta    `json:"alertas"`
 }
 
 const candidatos = 30
 
-func (r *RAG) aResultado(h Hit) Resultado {
+func (r *RAG) aResultado(h Hit, p Periodo) Resultado {
 	c := h.Payload
-	res := Resultado{ChunkID: c.ChunkID, DocID: c.DocID, Documento: c.DocID, Ruta: c.Ruta,
-		Pagina: c.Pagina, Texto: c.Texto, Score: h.Score, Estado: r.reg.Estado(c.DocID)}
+	res := Resultado{ChunkID: c.ChunkID, DocID: c.DocID, Documento: c.DocID, Ruta: c.Ruta, Seccion: c.Seccion,
+		Pagina: c.Pagina, Texto: c.Texto, Score: h.Score, Estado: r.reg.Estado(c.DocID, p), Vigencia: r.reg.Vigencia(c.DocID)}
+	if res.Estado == "modificado" && !r.reg.ArticuloModificado(c, p) {
+		res.Estado = "vigente" // el documento tiene modificaciones, pero no en este artículo
+	}
 	if d, ok := r.reg.Get(c.DocID); ok {
 		res.Documento, res.Tipo = d.Label(), d.Tipo
 		if d.URL != "" {
@@ -98,10 +100,17 @@ func (r *RAG) aResultado(h Hit) Resultado {
 	return res
 }
 
-// Search: 1 embedding + 1 query híbrida (Qdrant) + 1 rerank (proveedor configurado).
-// Los derogados NO se filtran: se devuelven marcados y se trae su reemplazo.
-func (r *RAG) Search(ctx context.Context, q string, k int, rerank bool) (*ResultadoBusqueda, error) {
-	vec, err := r.embedder().EmbedQuery(ctx, q)
+// Search: 1 embedding + 1 query híbrida (Qdrant) + 1 rerank, y después el
+// contexto que el registro exige y el ranking puede no traer (reusando el mismo
+// embedding, sin otra llamada al proveedor):
+//   - reemplazo: si un fragmento no rige en el periodo, el artículo que lo
+//     sustituye (por tabla de correspondencia) o fragmentos de su reemplazo;
+//   - modificacion / excepcion: el documento que modifica o exceptúa ese artículo;
+//   - definicion: la definición vigente de un término redefinido que el fragmento usa.
+//
+// Los que no rigen NO se filtran: se devuelven marcados con su estado.
+func (r *RAG) Search(ctx context.Context, q string, k int, rerank bool, p Periodo) (*ResultadoBusqueda, error) {
+	vec, err := r.emb.EmbedQuery(ctx, q)
 	if err != nil {
 		return nil, err
 	}
@@ -114,15 +123,14 @@ func (r *RAG) Search(ctx context.Context, q string, k int, rerank bool) (*Result
 	}
 
 	if rerank && len(hits) > 0 {
-		rrk := r.reranker()
-		if rrk == nil {
-			return nil, errors.New("rerank pedido pero no hay Reranker configurado")
+		if r.rr == nil {
+			return nil, fmt.Errorf("rerank pedido pero no hay Reranker configurado")
 		}
 		docs := make([]string, len(hits))
 		for i, h := range hits {
 			docs[i] = recortar(conEncabezado(r.reg, h.Payload), 4000)
 		}
-		rr, err := rrk.Rerank(ctx, q, docs, min(k, len(hits)))
+		rr, err := r.rr.Rerank(ctx, q, docs, min(k, len(hits)))
 		if err != nil {
 			return nil, err
 		}
@@ -137,44 +145,117 @@ func (r *RAG) Search(ctx context.Context, q string, k int, rerank bool) (*Result
 		hits = hits[:k]
 	}
 
-	out := &ResultadoBusqueda{}
-	presentes := map[string]bool{}
-	for _, h := range hits {
-		res := r.aResultado(h)
+	out := &ResultadoBusqueda{FechaConsulta: p.String()}
+	presentes := map[string]bool{}   // chunk_id
+	docPresente := map[string]bool{} // doc_id
+	agregarHit := func(h Hit, motivo string) {
+		if presentes[h.Payload.ChunkID] {
+			return
+		}
+		res := r.aResultado(h, p)
+		res.Motivo = motivo
+		if motivo != "" {
+			res.Score = 0
+		}
 		out.Resultados = append(out.Resultados, res)
-		presentes[res.DocID] = true
+		presentes[res.ChunkID], docPresente[res.DocID] = true, true
+	}
+	for _, h := range hits {
+		agregarHit(h, "")
 	}
 
-	// Paso "agéntico" barato: si apareció un derogado y su reemplazo no está,
-	// lo buscamos reusando el mismo embedding (sin otra llamada a Jina).
-	var faltan []string
-	for _, res := range out.Resultados {
-		if res.Estado != "derogado" {
-			continue
+	porID := map[string]string{}   // chunk_id → motivo
+	porDoc := map[string]string{}  // doc_id → motivo (fragmentos por similitud dentro del doc)
+	var ordenID, ordenDoc []string // orden de inserción, para resultados deterministas
+	pedirID := func(id, motivo string) {
+		if _, ya := porID[id]; !ya && !presentes[id] {
+			porID[id] = motivo
+			ordenID = append(ordenID, id)
 		}
-		if s := r.reg.Vigente(res.DocID); !presentes[s] {
-			presentes[s] = true
-			faltan = append(faltan, s)
+	}
+	pedirDoc := func(id, motivo string) {
+		if _, ya := porDoc[id]; !ya && !docPresente[id] {
+			porDoc[id] = motivo
+			ordenDoc = append(ordenDoc, id)
+		}
+	}
+	for _, res := range out.Resultados {
+		c := res.chunk()
+		if !rige(res.Estado) {
+			if dst, ok := r.reg.Correspondencia(res.ChunkID); ok {
+				pedirID(dst, "reemplazo")
+			} else {
+				for _, x := range r.reg.Reemplazos(res.DocID) {
+					pedirDoc(x, "reemplazo")
+				}
+			}
+		}
+		for _, a := range r.reg.Afectantes(c) {
+			pedirDoc(a.Doc, a.Motivo)
+		}
+		for _, d := range r.reg.Definiciones(c, p) {
+			pedirID(d, "definicion")
+		}
+	}
+	if len(ordenID) > 0 {
+		extra, err := r.qd.PorIDs(ctx, ordenID)
+		if err != nil {
+			log.Printf("search: no pude traer %v: %v", ordenID, err)
+		}
+		for _, h := range extra {
+			agregarHit(h, porID[h.Payload.ChunkID])
+		}
+	}
+	var faltan []string
+	for _, d := range ordenDoc {
+		if !docPresente[d] { // pudo llegar por ID en el paso anterior
+			faltan = append(faltan, d)
 		}
 	}
 	if len(faltan) > 0 {
-		if extra, err := r.qd.DenseEnDocs(ctx, vec, faltan, 2*len(faltan)); err == nil {
-			for _, h := range extra {
-				res := r.aResultado(h)
-				res.Reemplazo = true
-				out.Resultados = append(out.Resultados, res)
-			}
+		extra, err := r.qd.DenseEnDocs(ctx, vec, faltan, min(2*len(faltan), 6))
+		if err != nil {
+			log.Printf("search: no pude traer fragmentos de %v: %v", faltan, err)
+		}
+		for _, h := range extra {
+			agregarHit(h, porDoc[h.Payload.DocID])
 		}
 	}
 
-	vistos := map[string]bool{}
-	for _, res := range out.Resultados {
-		if !vistos[res.DocID] {
-			vistos[res.DocID] = true
-			out.Alertas = append(out.Alertas, r.reg.Alertas(res.DocID)...)
+	out.Alertas = r.alertas(out.Resultados, p)
+	return out, nil
+}
+
+// alertas: estado de cada documento (una vez) y lo que afecta a cada artículo.
+func (r *RAG) alertas(res []Resultado, p Periodo) []Alerta {
+	out := []Alerta{}
+	vistas := map[Alerta]bool{}
+	docs := map[string]bool{}
+	for _, x := range res {
+		var as []Alerta
+		if !docs[x.DocID] {
+			docs[x.DocID] = true
+			as = r.reg.AlertasDoc(x.DocID, p)
+		}
+		for _, a := range append(as, r.reg.AlertasChunk(x.chunk(), p)...) {
+			// La misma redefinición de un término sale una vez por documento.
+			clave := Alerta{Tipo: a.Tipo, DocID: a.DocID, Detalle: a.Detalle}
+			if !vistas[clave] {
+				vistas[clave] = true
+				out = append(out, a)
+			}
 		}
 	}
-	return out, nil
+	return out
+}
+
+// notas: lo que el registro dice de este fragmento en el periodo, para el prompt.
+func (r *RAG) notas(x Resultado, p Periodo) []string {
+	var out []string
+	for _, a := range append(r.reg.AlertasDoc(x.DocID, p), r.reg.AlertasChunk(x.chunk(), p)...) {
+		out = append(out, a.Detalle)
+	}
+	return out
 }
 
 // ---------- Generación ----------
@@ -198,13 +279,17 @@ type Contradiccion struct {
 }
 
 type Respuesta struct {
-	Respuesta        string          `json:"respuesta"`
-	SinRespuesta     bool            `json:"sin_respuesta"`
-	Citas            []Cita          `json:"citas"`
-	CitasDescartadas int             `json:"citas_descartadas"`
-	Contradicciones  []Contradiccion `json:"contradicciones"`
-	Alertas          []Alerta        `json:"alertas"`
-	Fuentes          []Resultado     `json:"fuentes"`
+	FechaConsulta    string `json:"fecha_consulta"`
+	Respuesta        string `json:"respuesta"`
+	SinRespuesta     bool   `json:"sin_respuesta"`
+	Citas            []Cita `json:"citas"`
+	CitasDescartadas int    `json:"citas_descartadas"`
+	// CitasHistoricas: citas válidas de documentos que no rigen en la fecha de
+	// consulta (derogados, caducados): se muestran como antecedente, no como norma.
+	CitasHistoricas []Cita          `json:"citas_historicas"`
+	Contradicciones []Contradiccion `json:"contradicciones"`
+	Alertas         []Alerta        `json:"alertas"`
+	Fuentes         []Resultado     `json:"fuentes"`
 }
 
 type salidaLLM struct {
@@ -225,49 +310,101 @@ const promptSistema = `Eres un asistente de cumplimiento normativo para analista
 Responde ÚNICAMENTE con información de los FRAGMENTOS. No uses conocimiento externo.
 
 Reglas:
-1. Cada afirmación de "respuesta" termina con el chunk_id de su fuente entre corchetes, por ejemplo [sbs-877-2020#articulo-5].
+1. Cada afirmación de "respuesta" termina con el chunk_id de su fuente entre corchetes, por ejemplo [prc-001#articulo-4].
 2. En "citas", "cita_textual" es una copia EXACTA y literal (1 o 2 oraciones) del texto del fragmento. No parafrasees dentro de la cita.
-3. Si un fragmento está DEROGADO, no lo presentes como vigente: indica que fue derogado y usa el documento que lo reemplaza si está entre los fragmentos.
-4. Si dos fragmentos de documentos distintos fijan reglas incompatibles sobre lo mismo (plazos, montos, frecuencias, responsables), repórtalo en "contradicciones".
-5. Si los fragmentos no permiten responder, pon "sin_respuesta": true y explica qué falta. No inventes.
+3. Responde según la FECHA DE CONSULTA. Cada fragmento indica su vigencia y su estado en esa fecha, y puede traer NOTAS del registro de vigencia: las NOTAS son obligatorias y mandan sobre lo que diga el texto del fragmento (por ejemplo, un "Estado: VIGENTE" impreso en un documento que ya fue reemplazado).
+4. Un fragmento DEROGADO, CADUCADO o AUN_NO_VIGENTE en la fecha de consulta no es norma aplicable: dilo explícitamente (por ejemplo "caducó el 31/12/2024 sin reemplazo") y responde con el documento que lo reemplaza si está entre los fragmentos. Si la pregunta es sobre una fecha pasada, aplica lo que regía en esa fecha.
+5. Si una NOTA dice que un artículo fue modificado o que una excepción temporal prevalece sobre él, aplica el texto del documento modificatorio o de la excepción (dentro de su ámbito) y menciona también la regla general y cuándo vuelve a regir.
+6. Si una NOTA dice que un término fue redefinido, aplica la definición nueva y advierte que el otro documento todavía conserva el texto anterior (indica qué dice cada uno).
+7. Si dos fragmentos de documentos distintos fijan reglas incompatibles sobre lo mismo (plazos, montos, frecuencias, responsables, definiciones), repórtalo en "contradicciones".
+8. Si los fragmentos no permiten responder, pon "sin_respuesta": true y explica qué falta. No inventes.
 
 Devuelve SOLO un objeto JSON válido, sin texto adicional, con esta forma:
 {"respuesta": "...", "sin_respuesta": false, "citas": [{"chunk_id": "...", "cita_textual": "..."}], "contradicciones": [{"chunk_a": "...", "chunk_b": "...", "explicacion": "..."}]}`
 
-func (r *RAG) armarPrompt(pregunta string, res []Resultado) string {
+func (r *RAG) armarPrompt(pregunta string, p Periodo, res []Resultado) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "PREGUNTA: %s\n\nFRAGMENTOS:\n", pregunta)
+	fmt.Fprintf(&b, "FECHA DE CONSULTA: %s (fecha de referencia: %s)\nPREGUNTA: %s\n\nFRAGMENTOS:\n",
+		p, fmtFecha(r.referencia()), pregunta)
 	for _, x := range res {
-		estado := strings.ToUpper(x.Estado)
-		if d, ok := r.reg.Get(x.DocID); ok && d.DerogadoPor != "" {
-			if s, ok := r.reg.Get(d.DerogadoPor); ok {
-				estado += " (reemplazado por " + s.Label() + ")"
-			}
+		fmt.Fprintf(&b, "[%s]\nDocumento: %s | Tipo: %s | Vigencia: %s | Estado en la fecha de consulta: %s | %s | pág. %d\n",
+			x.ChunkID, x.Documento, x.Tipo, x.Vigencia, strings.ToUpper(x.Estado), x.Ruta, x.Pagina)
+		for _, n := range r.notas(x, p) {
+			fmt.Fprintf(&b, "NOTA: %s\n", n)
 		}
-		fecha := ""
-		if d, ok := r.reg.Get(x.DocID); ok {
-			fecha = d.Fecha
-		}
-		fmt.Fprintf(&b, "[%s]\nDocumento: %s | Tipo: %s | Estado: %s | Fecha: %s | %s | pág. %d\nTexto: %s\n---\n",
-			x.ChunkID, x.Documento, x.Tipo, estado, fecha, x.Ruta, x.Pagina, x.Texto)
+		fmt.Fprintf(&b, "Texto: %s\n---\n", x.Texto)
 	}
 	return b.String()
 }
 
+// Consulta es el body de /ask.
+type Consulta struct {
+	Pregunta  string  `json:"pregunta"`
+	Fecha     string  `json:"fecha,omitempty"`     // YYYY-MM-DD o dd/mm/yyyy; pisa la fecha detectada en la pregunta
+	Historial []Turno `json:"historial,omitempty"` // turnos anteriores, del más viejo al más nuevo
+}
+
+type Turno struct {
+	Pregunta  string `json:"pregunta"`
+	Respuesta string `json:"respuesta,omitempty"`
+}
+
+// Periodo de la consulta: fecha explícita > fecha en la pregunta > fecha en el
+// turno anterior ("¿y quién lo aprueba?") > fecha de referencia.
+func (r *RAG) Periodo(c Consulta) (Periodo, error) {
+	if c.Fecha != "" {
+		t, ok := parseFecha(c.Fecha)
+		if !ok {
+			return Periodo{}, fmt.Errorf("fecha %q inválida (YYYY-MM-DD o dd/mm/yyyy)", c.Fecha)
+		}
+		return periodoDia(t), nil
+	}
+	if p, ok := periodoDesdePregunta(c.Pregunta); ok {
+		return p, nil
+	}
+	if n := len(c.Historial); n > 0 {
+		if p, ok := periodoDesdePregunta(c.Historial[n-1].Pregunta); ok {
+			return p, nil
+		}
+	}
+	return periodoDia(r.referencia()), nil
+}
+
+// queryBusqueda: con historial, la pregunta anterior le da contexto a una
+// repregunta corta ("¿Y en marzo de 2027?").
+func queryBusqueda(c Consulta) string {
+	if n := len(c.Historial); n > 0 {
+		return c.Historial[n-1].Pregunta + " " + c.Pregunta
+	}
+	return c.Pregunta
+}
+
 // Ask: búsqueda + 1 sola llamada al LLM que responde Y detecta contradicciones
 // (no hace falta una segunda llamada). Después el código valida todo.
-func (r *RAG) Ask(ctx context.Context, pregunta string) (*Respuesta, error) {
-	sr, err := r.Search(ctx, pregunta, 8, true)
+func (r *RAG) Ask(ctx context.Context, c Consulta) (*Respuesta, error) {
+	p, err := r.Periodo(c)
 	if err != nil {
 		return nil, err
 	}
-	out := &Respuesta{Alertas: sr.Alertas, Fuentes: sr.Resultados, Citas: []Cita{}, Contradicciones: []Contradiccion{}}
+	sr, err := r.Search(ctx, queryBusqueda(c), 8, true, p)
+	if err != nil {
+		return nil, err
+	}
+	out := &Respuesta{FechaConsulta: p.String(), Alertas: sr.Alertas, Fuentes: sr.Resultados,
+		Citas: []Cita{}, CitasHistoricas: []Cita{}, Contradicciones: []Contradiccion{}}
 	if len(sr.Resultados) == 0 {
 		out.SinRespuesta = true
 		out.Respuesta = "No encontré fragmentos relevantes en el corpus."
 		return out, nil
 	}
-	msgs := []Mensaje{{Role: "system", Content: promptSistema}, {Role: "user", Content: r.armarPrompt(pregunta, sr.Resultados)}}
+	msgs := []Mensaje{{Role: "system", Content: promptSistema}}
+	for _, t := range c.Historial {
+		msgs = append(msgs, Mensaje{Role: "user", Content: t.Pregunta})
+		if t.Respuesta != "" {
+			msgs = append(msgs, Mensaje{Role: "assistant", Content: t.Respuesta})
+		}
+	}
+	msgs = append(msgs, Mensaje{Role: "user", Content: r.armarPrompt(c.Pregunta, p, sr.Resultados)})
 	raw, err := r.llm.Chat(ctx, msgs)
 	if err != nil {
 		return nil, err
@@ -292,34 +429,39 @@ func (r *RAG) Ask(ctx context.Context, pregunta string) (*Respuesta, error) {
 		porID[x.ChunkID] = x
 	}
 	var descartadas []string
-	for _, c := range s.Citas {
-		x, ok := porID[c.ChunkID]
-		if !ok || !citaValida(x.Texto, c.CitaTextual) {
+	for _, ct := range s.Citas {
+		x, ok := porID[ct.ChunkID]
+		if !ok || !citaValida(x.Texto, ct.CitaTextual) {
 			out.CitasDescartadas++ // cita alucinada o parafraseada: afuera
 			motivo := "no coincide con el chunk"
 			if !ok {
 				motivo = "chunk_id inexistente"
 			}
-			descartadas = append(descartadas, fmt.Sprintf("[%s] %q (%s)", c.ChunkID, recortar(c.CitaTextual, 80), motivo))
+			descartadas = append(descartadas, fmt.Sprintf("[%s] %q (%s)", ct.ChunkID, recortar(ct.CitaTextual, 80), motivo))
 			continue
 		}
 		// Se devuelve la cita ORIGINAL; la normalización es solo para comparar.
-		out.Citas = append(out.Citas, Cita{ChunkID: c.ChunkID, CitaTextual: c.CitaTextual,
-			Documento: x.Documento, Ruta: x.Ruta, Pagina: x.Pagina, Estado: x.Estado, URL: x.URL})
+		cita := Cita{ChunkID: ct.ChunkID, CitaTextual: ct.CitaTextual,
+			Documento: x.Documento, Ruta: x.Ruta, Pagina: x.Pagina, Estado: x.Estado, URL: x.URL}
+		if rige(x.Estado) {
+			out.Citas = append(out.Citas, cita)
+		} else {
+			out.CitasHistoricas = append(out.CitasHistoricas, cita)
+		}
 	}
-	log.Printf("ask: citas válidas=%d descartadas=%d", len(out.Citas), out.CitasDescartadas)
+	log.Printf("ask [%s]: citas válidas=%d históricas=%d descartadas=%d", p, len(out.Citas), len(out.CitasHistoricas), out.CitasDescartadas)
 	for _, d := range descartadas {
 		log.Printf("  cita descartada: %s", d)
 	}
-	for _, c := range s.Contradicciones {
-		a, okA := porID[c.ChunkA]
-		b, okB := porID[c.ChunkB]
+	for _, ct := range s.Contradicciones {
+		a, okA := porID[ct.ChunkA]
+		b, okB := porID[ct.ChunkB]
 		if !okA || !okB || a.DocID == b.DocID {
 			continue
 		}
-		gan, crit := r.reg.Prevalece(a.DocID, b.DocID)
+		gan, crit := r.reg.Prevalece(a.DocID, b.DocID, p)
 		out.Contradicciones = append(out.Contradicciones, Contradiccion{
-			ChunkA: c.ChunkA, ChunkB: c.ChunkB, Explicacion: c.Explicacion, Prevalece: gan, Criterio: crit})
+			ChunkA: ct.ChunkA, ChunkB: ct.ChunkB, Explicacion: ct.Explicacion, Prevalece: gan, Criterio: crit})
 	}
 	return out, nil
 }

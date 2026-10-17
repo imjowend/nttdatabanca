@@ -51,5 +51,6 @@ services:
       REGISTRY_PATH: /app/registry.json
     volumes:
       - ./registry.json:/app/registry.json:ro
+      - ./registry.overrides.json:/app/registry.overrides.json:ro
       - ./corpus:/app/corpus:ro
       - ./out:/app/out
