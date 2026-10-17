@@ -5,6 +5,8 @@ Go 1.22+, solo librería estándar. Servicios externos: Qdrant Cloud, Voyage AI 
 
 Corpus actual: los PDFs del Hack AI Agents 2026 (Banco Andino del Sur S.A., ficticio) en `corpus/`.
 
+> **Próximo cambio:** Qdrant se va a reemplazar por **PostgreSQL + pgvector**. Todavía no está aplicado: hoy todo lo que se describe abajo usa Qdrant. Ver [Migración a pgvector](#migración-a-pgvector-planificada).
+
 ## Qué hace
 - **Lee los PDFs** con una plantilla común (bloque de metadatos + artículos + anexos), descarta encabezados, pies, firmas y el control de cambios, y los parte por artículo y anexo. Un `ANEXO A - … (PRC-001)` con metadatos propios se registra como **documento derivado**.
 - **Genera el registro de vigencia** (`registro`) desde los metadatos: vigente desde/hasta, reemplazos (uno a uno, muchos a uno, uno a muchos), modificaciones de artículos puntuales, excepciones temporales, redefiniciones de términos y tablas de correspondencia de artículos.
@@ -12,6 +14,14 @@ Corpus actual: los PDFs del Hack AI Agents 2026 (Banco Andino del Sur S.A., fict
 - **Trae el contexto que manda el registro** aunque el ranking no lo traiga: el artículo que reemplaza a uno derogado, la modificación o excepción que afecta a un artículo y la definición vigente de un término redefinido.
 - **Valida las citas** contra los chunks (las inventadas se descartan) y separa las de documentos que no rigen en esa fecha (`citas_historicas`).
 - **Resuelve las contradicciones con código, no con el LLM**: pierde lo que no rige; después gana una relación expresa (excepción, redefinición, modificación, reemplazo); después la norma posterior.
+
+### Pipeline de `/ask`
+1. **Fecha de consulta**: `fecha` del request > fecha en la pregunta > fecha en el turno anterior del historial > `FECHA_REFERENCIA`.
+2. **Búsqueda híbrida** en una sola query a Qdrant: dense (Voyage/Jina) + BM25 (sparse, IDF calculado por Qdrant) fusionados con RRF, 30 candidatos. Si la pregunta nombra un documento (`PRC-001`), un tercer prefetch filtrado a ese documento lo empuja arriba.
+3. **Rerank** de los candidatos con el encabezado contextual (documento + sección + artículo) → top 8.
+4. **Contexto del registro**: se agregan los chunks de reemplazo, modificación, excepción y definición que correspondan (por ID y por similitud dentro del documento, en paralelo y reusando el mismo embedding).
+5. **Una sola llamada al LLM** (JSON con `json_schema`, fallback a `json_object`) que responde y señala contradicciones.
+6. **Validación en código**: citas literales contra el chunk, separación vigentes/históricas y resolución de qué prevalece.
 
 ## Requisitos
 - Go 1.22+
@@ -28,13 +38,17 @@ set -a; source .env; set +a
 | Variable | Para qué |
 |---|---|
 | `QDRANT_URL`, `QDRANT_API_KEY` | Cluster de Qdrant Cloud (incluir el puerto `:6333`) |
+| `QDRANT_COLLECTION` | Default `normativa_<EMB_PROVIDER>` |
 | `EMB_PROVIDER`, `RERANK_PROVIDER` | `voyage` (default) o `jina` |
 | `VOYAGE_API_KEY` / `JINA_API_KEY` | Key del proveedor elegido |
-| `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL` | Cualquier API compatible con OpenAI |
+| `VOYAGE_EMBED_MODEL`, `VOYAGE_RERANK_MODEL` | Default `voyage-4` y `rerank-2.5` |
+| `JINA_EMBED_MODEL`, `JINA_RERANK_MODEL`, `EMBED_DIM` | Default `jina-embeddings-v5-text-small`, `jina-reranker-v3.5` y `1024` (solo Jina) |
+| `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL` | Cualquier API compatible con OpenAI (default: Gemini, `gemini-3.8-flash`) |
 | `LLM_REASONING_EFFORT` | `low` \| `medium` \| `high` (Gemini 3.x no admite `none`) |
 | `LLM_PRICE_IN`, `LLM_PRICE_OUT` | USD por millón de tokens, solo para el log de costo |
 | `FECHA_REFERENCIA` | "Hoy" para la vigencia (`2026-10-17` en la hackathon). Vacío = fecha del sistema |
 | `REGISTRY_PATH`, `ADDR`, `CORS_ORIGIN` | Registro de vigencia, puerto (`:8080`) y CORS |
+| `API_KEY` | Si se define, la API exige `Authorization: Bearer <API_KEY>` (salvo `/healthz`). Vacío = sin autenticación |
 
 Cada comando valida solo lo que usa: `registro` no pide keys, `eval` no pide el LLM y `eval -norerank` no pide el reranker.
 
@@ -116,6 +130,15 @@ curl -s 'localhost:8080/docs/prc-001?fecha=2027-03-15' | jq
 | POST | `/search` `{"query", "k"?, "fecha"?}` | Chunks + metadata + alertas, sin LLM |
 | GET | `/docs[?fecha=]` | Registro con el estado de cada documento en esa fecha |
 | GET | `/docs/{id}[?fecha=]` | Historial: reemplaza / reemplazado_por / modifica / prevalece_sobre / derivados |
+| GET | `/healthz` | `{"status": "ok"}` (lo usa `normativa-rag healthcheck` en Docker) |
+
+`/search` acepta `k` entre 1 y 20 (default 6). Los errores van como `{"error": "..."}`: 400 validación, 401 falta la API key, 502 falló un proveedor externo y 504 se venció el tiempo del request.
+
+Con `API_KEY` definida, agregar `-H "Authorization: Bearer $API_KEY"` a los `curl` de arriba.
+
+**Límites del servidor**: body de hasta 1 MB; `/search` corta a los 30 s y `/ask` a los 150 s (embedding + rerank + hasta 3 llamadas al LLM). Ante SIGTERM (`docker compose stop`) deja de aceptar conexiones y espera hasta 25 s a que terminen las que están en curso.
+
+**Costo**: los embeddings de las últimas 256 preguntas quedan en memoria (repetir una pregunta no vuelve a pagar el embedding), y a `/ask` solo llegan los últimos 3 turnos del `historial`, recortados a 2000 caracteres cada uno.
 
 ### Forma de la respuesta de `/ask`
 Ejemplo completo en `ejemplo_respuesta.json` (lo regenera `go test`). Campos principales:
@@ -155,6 +178,13 @@ Cambiar el registro **no** requiere re-ingestar, solo reiniciar el server. Cambi
 Cada proveedor usa su propia colección (`normativa_<proveedor>`) porque las dimensiones difieren; si la dimensión no coincide, falla con un mensaje claro. Para cambiar a Jina: `EMB_PROVIDER=jina`, `RERANK_PROVIDER=jina`, `JINA_API_KEY=...` y re-ingestar.
 
 Reintentos (`httpx.go`): Voyage/Jina y Qdrant, 5 intentos con backoff exponencial y `Retry-After` (el upsert es idempotente: IDs determinísticos; "ya existe" al crear la colección cuenta como éxito). LLM: máximo 1 reintento, solo ante 429/503 y nunca ante timeout. Todo respeta el `context` del request.
+
+## Migración a pgvector (planificada)
+Qdrant se va a reemplazar por PostgreSQL + pgvector. **Todavía no está implementado**; esta sección solo anticipa el alcance:
+- El acceso al índice está concentrado en `clients.go` (`Qdrant`: `Asegurar`, `Upsert`, `Hibrida`, `DenseEnDocs`, `PorIDs`, `Info`). La migración reemplaza ese cliente; el registro de vigencia, el chunking, el rerank y la validación de citas no cambian.
+- La búsqueda híbrida hoy la resuelve Qdrant (dense + sparse BM25 + RRF). En Postgres habrá que armarla en SQL: `vector` con índice HNSW para dense, full-text (`tsvector` con configuración `spanish`) o `sparsevec` para la parte léxica, y la fusión RRF en la query.
+- Las variables `QDRANT_*` se reemplazarán por la conexión a Postgres, y habrá que re-ingestar el corpus.
+- Como el proyecto usa solo la librería estándar, hará falta agregar un driver de Postgres (por ejemplo `pgx`) o hablar con la base por otra vía.
 
 ## Problemas comunes
 | Síntoma | Causa probable |

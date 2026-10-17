@@ -82,10 +82,6 @@ func schemaDe(t reflect.Type) map[string]any {
 	return map[string]any{"type": "string"}
 }
 
-func (l *LLM) ChatJSON(ctx context.Context, system, user string) (string, error) {
-	return l.Chat(ctx, []Mensaje{{Role: "system", Content: system}, {Role: "user", Content: user}})
-}
-
 // Chat pide una respuesta JSON. Intenta con response_format json_schema; si el
 // endpoint lo rechaza con 400, cae a json_object y lo recuerda para la sesión.
 // No manda temperature ni max_tokens: el thinking cuenta como output y un tope

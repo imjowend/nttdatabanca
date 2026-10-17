@@ -2,13 +2,29 @@ package main
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"slices"
 	"strings"
+	"syscall"
+	"time"
+)
+
+const (
+	maxBody       = 1 << 20 // 1 MB: alcanza para una pregunta con historial
+	timeoutSearch = 30 * time.Second
+	// /ask puede encadenar embedding + rerank + hasta 3 llamadas al LLM
+	// (fallback de json_schema y reintento por JSON inválido).
+	timeoutAsk = 150 * time.Second
+	// Docker manda SIGKILL 10 s después de SIGTERM salvo stop_grace_period
+	// (compose.yaml lo sube a 30 s).
+	timeoutApagado = 25 * time.Second
 )
 
 func escribirJSON(w http.ResponseWriter, status int, v any) {
@@ -21,6 +37,37 @@ func escribirJSON(w http.ResponseWriter, status int, v any) {
 
 func errorJSON(w http.ResponseWriter, status int, err error) {
 	escribirJSON(w, status, map[string]string{"error": err.Error()})
+}
+
+// statusError: 504 si se venció el timeout del request, 502 si falló un proveedor.
+func statusError(err error) int {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return http.StatusGatewayTimeout
+	}
+	return http.StatusBadGateway
+}
+
+// autenticar exige "Authorization: Bearer <API_KEY>" si API_KEY está definida.
+// /healthz queda abierto para el healthcheck de Docker.
+func autenticar(key string, next http.Handler) http.Handler {
+	if key == "" {
+		return next
+	}
+	esperado := []byte("Bearer " + key)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/healthz" && subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), esperado) != 1 {
+			errorJSON(w, http.StatusUnauthorized, errors.New("falta o es inválido el header Authorization: Bearer <API_KEY>"))
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func limitarBody(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.Body = http.MaxBytesReader(w, r.Body, maxBody)
+		next.ServeHTTP(w, r)
+	})
 }
 
 func cors(origin string, next http.Handler) http.Handler {
@@ -62,9 +109,11 @@ func runServe(cfg Config, rag *RAG) error {
 			errorJSON(w, 400, err)
 			return
 		}
-		sr, err := rag.Search(r.Context(), in.Query, in.K, true, p)
+		ctx, cancel := context.WithTimeout(r.Context(), timeoutSearch)
+		defer cancel()
+		sr, err := rag.Search(ctx, in.Query, in.K, true, p)
 		if err != nil {
-			errorJSON(w, 502, err)
+			errorJSON(w, statusError(err), err)
 			return
 		}
 		escribirJSON(w, 200, sr)
@@ -80,9 +129,11 @@ func runServe(cfg Config, rag *RAG) error {
 			errorJSON(w, 400, err)
 			return
 		}
-		resp, err := rag.Ask(r.Context(), in)
+		ctx, cancel := context.WithTimeout(r.Context(), timeoutAsk)
+		defer cancel()
+		resp, err := rag.Ask(ctx, in)
 		if err != nil {
-			errorJSON(w, 502, err)
+			errorJSON(w, statusError(err), err)
 			return
 		}
 		escribirJSON(w, 200, resp)
@@ -125,8 +176,34 @@ func runServe(cfg Config, rag *RAG) error {
 		escribirJSON(w, 200, h)
 	})
 
-	log.Printf("API escuchando en %s (fecha de referencia %s)", cfg.Addr, fmtFecha(rag.referencia()))
-	return http.ListenAndServe(cfg.Addr, cors(cfg.CORSOrigin, mux))
+	srv := &http.Server{
+		Addr: cfg.Addr,
+		// CORS por fuera de la autenticación: el preflight OPTIONS no lleva el header.
+		Handler:           cors(cfg.CORSOrigin, autenticar(cfg.APIKey, limitarBody(mux))),
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      timeoutAsk + 10*time.Second,
+		IdleTimeout:       2 * time.Minute,
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	errc := make(chan error, 1)
+	go func() { errc <- srv.ListenAndServe() }()
+	auth := "sin autenticación"
+	if cfg.APIKey != "" {
+		auth = "con API_KEY"
+	}
+	log.Printf("API escuchando en %s, %s (fecha de referencia %s)", cfg.Addr, auth, fmtFecha(rag.referencia()))
+
+	select {
+	case err := <-errc:
+		return err
+	case <-ctx.Done():
+	}
+	log.Printf("apagando: espero hasta %s a que terminen los requests en curso", timeoutApagado)
+	sctx, cancel := context.WithTimeout(context.Background(), timeoutApagado)
+	defer cancel()
+	return srv.Shutdown(sctx)
 }
 
 // ---------- Evals ----------
