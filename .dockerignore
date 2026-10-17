@@ -1,0 +1,16 @@
+# Secretos y artefactos locales: nunca al contexto de build
+.env
+.env.*
+!.env.example
+.git
+.gitignore
+normativa-rag
+chunks.jsonl
+out/
+*.test
+*_test.go
+ejemplo_respuesta.json
+Dockerfile
+compose.yaml
+.dockerignore
+README.md

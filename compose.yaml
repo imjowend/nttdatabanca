@@ -1,0 +1,55 @@
+# Uso:
+#   docker compose up -d --build                     # API en :8080
+#   docker compose run --rm ingest -dry              # chunking sin gastar créditos → ./out/chunks.jsonl
+#   docker compose run --rm ingest                   # indexar en Qdrant
+#   docker compose run --rm api eval [-norerank]     # medir retrieval
+
+x-hardening: &hardening
+  env_file: .env
+  init: true
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  tmpfs: [/tmp]
+
+services:
+  api:
+    <<: *hardening
+    build:
+      context: .
+      target: runtime
+    image: normativa-rag:latest
+    environment:
+      ADDR: ":8080"
+      REGISTRY_PATH: /app/registry.json
+    ports:
+      - "${HOST_PORT:-8080}:8080"
+    volumes:
+      # Cambiar estados de vigencia solo requiere reiniciar, no rebuild.
+      - ./registry.json:/app/registry.json:ro
+      - ./evals.json:/app/evals.json:ro
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 256M
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  ingest:
+    <<: *hardening
+    build:
+      context: .
+      target: ingest
+    image: normativa-rag:ingest
+    profiles: [tools]
+    environment:
+      REGISTRY_PATH: /app/registry.json
+    volumes:
+      - ./registry.json:/app/registry.json:ro
+      - ./corpus:/app/corpus:ro
+      - ./out:/app/out

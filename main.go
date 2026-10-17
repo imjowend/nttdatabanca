@@ -9,10 +9,12 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type Config struct {
@@ -155,8 +157,30 @@ func uso() {
   normativa-rag ingest [-dry] [-reset=true]   parsea, chunkea, embebe e indexa el corpus
   normativa-rag eval   [-f evals.json] [-k 5] [-norerank]   mide el retrieval (sin LLM)
   normativa-rag serve                          levanta la API HTTP
+  normativa-rag healthcheck                    consulta /healthz local (para Docker)
 `)
 	os.Exit(2)
+}
+
+// healthcheck: la imagen distroless no trae curl ni shell, así que el propio
+// binario consulta /healthz. No carga config ni registro: solo necesita ADDR.
+func healthcheck() int {
+	addr := env("ADDR", ":8080")
+	if strings.HasPrefix(addr, ":") {
+		addr = "127.0.0.1" + addr
+	}
+	c := http.Client{Timeout: 3 * time.Second}
+	resp, err := c.Get("http://" + addr + "/healthz")
+	if err != nil {
+		log.Print(err)
+		return 1
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		log.Printf("healthz: %s", resp.Status)
+		return 1
+	}
+	return 0
 }
 
 func main() {
@@ -165,6 +189,9 @@ func main() {
 		uso()
 	}
 	cmd, args := os.Args[1], os.Args[2:]
+	if cmd == "healthcheck" {
+		os.Exit(healthcheck())
+	}
 	cfg, err := cargarConfig()
 	if err != nil {
 		log.Fatal(err)

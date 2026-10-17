@@ -55,6 +55,21 @@ go run . serve
 
 Orden recomendado la primera vez: `-dry` → `ingest` → `eval` → `serve`.
 
+### Con Docker
+Compose lee `.env` solo (no hace falta el `source`).
+
+```bash
+docker compose run --rm ingest -dry      # chunking → ./out/chunks.jsonl
+docker compose run --rm ingest           # indexar en Qdrant
+docker compose run --rm api eval         # medir retrieval
+docker compose up -d --build             # API en :8080 (HOST_PORT=18080 para cambiar el puerto)
+```
+
+- `api`: distroless `static` nonroot (~15 MB), sin shell; el healthcheck usa `normativa-rag healthcheck`.
+- `ingest` (perfil `tools`): Alpine + `pdftotext` (~60 MB), solo se construye cuando lo usás.
+- `registry.json` y `corpus/` se montan de solo lectura: cambiar estados solo pide `docker compose restart api`.
+- En Linux, si `ingest` no puede escribir en `./out`, ejecutá `mkdir -p out && sudo chown 65532 out`.
+
 ## Cómo usar la API
 
 ```bash

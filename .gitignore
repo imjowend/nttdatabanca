@@ -2,3 +2,4 @@
 chunks.jsonl
 normativa-rag
 *.test
+out/
