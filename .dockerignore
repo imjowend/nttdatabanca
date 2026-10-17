@@ -14,3 +14,6 @@ Dockerfile
 compose.yaml
 .dockerignore
 README.md
+testdata/
+# Índice con las respuestas esperadas: nunca se indexa ni viaja en la imagen
+corpus/00_LEEME*

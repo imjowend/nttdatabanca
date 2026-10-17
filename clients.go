@@ -244,3 +244,20 @@ func (q *Qdrant) DenseEnDocs(ctx context.Context, dense []float32, ids []string,
 		"query": dense, "using": "dense", "filter": filtroDocs(ids), "limit": limit, "with_payload": true,
 	})
 }
+
+// PorIDs trae puntos por chunk_id (sin búsqueda): para inyectar artículos
+// puntuales que manda el registro (correspondencias, definiciones).
+func (q *Qdrant) PorIDs(ctx context.Context, chunkIDs []string) ([]Hit, error) {
+	ids := make([]uint64, len(chunkIDs))
+	for i, c := range chunkIDs {
+		ids[i] = idPunto(c)
+	}
+	var resp struct {
+		Result []Hit `json:"result"`
+	}
+	if err := doJSON(ctx, politicaQdrant, "POST", q.url("/points"), q.h(),
+		map[string]any{"ids": ids, "with_payload": true, "with_vector": false}, &resp); err != nil {
+		return nil, fmt.Errorf("qdrant points: %w", err)
+	}
+	return resp.Result, nil
+}

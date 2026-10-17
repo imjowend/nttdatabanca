@@ -11,6 +11,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -26,6 +27,7 @@ type Config struct {
 	LLMBase, LLMKey, LLMModel, LLMEffort           string
 	PriceIn, PriceOut                              float64 // USD por millón de tokens
 	RegistryPath, Addr, CORSOrigin                 string
+	FechaRef                                       string // FECHA_REFERENCIA; vacío = hoy
 }
 
 func env(k, def string) string {
@@ -70,6 +72,7 @@ func cargarConfig() (Config, error) {
 		RegistryPath:      env("REGISTRY_PATH", "registry.json"),
 		Addr:              env("ADDR", ":8080"),
 		CORSOrigin:        env("CORS_ORIGIN", "*"),
+		FechaRef:          env("FECHA_REFERENCIA", ""),
 	}
 	var err error
 	if cfg.PriceIn, err = envFloat("LLM_PRICE_IN", 0.75); err != nil {
@@ -138,7 +141,11 @@ func nuevoRAG(cfg Config, reg *Registry, conLLM, conRerank bool) (*RAG, error) {
 	if err != nil {
 		return nil, err
 	}
-	r := &RAG{reg: reg, emb: emb, qd: q}
+	hoy, err := fechaReferencia(cfg.FechaRef)
+	if err != nil {
+		return nil, err
+	}
+	r := &RAG{reg: reg, emb: emb, qd: q, hoy: hoy}
 	if conRerank {
 		if r.rr, err = nuevoReranker(cfg); err != nil {
 			return nil, err
@@ -154,8 +161,11 @@ func nuevoRAG(cfg Config, reg *Registry, conLLM, conRerank bool) (*RAG, error) {
 
 func uso() {
 	fmt.Fprint(os.Stderr, `uso:
+  normativa-rag registro [-dry] [-corpus corpus] [-overrides registry.overrides.json] [-o registry.json]
+                                               genera el registro de vigencia desde los PDFs
   normativa-rag ingest [-dry] [-reset=true]   parsea, chunkea, embebe e indexa el corpus
-  normativa-rag eval   [-f evals.json] [-k 5] [-norerank]   mide el retrieval (sin LLM)
+  normativa-rag eval   [-f evals.json] [-k 5] [-norerank] [-llm]
+                                               mide el retrieval (sin LLM); -llm verifica también las respuestas
   normativa-rag serve                          levanta la API HTTP
   normativa-rag healthcheck                    consulta /healthz local (para Docker)
 `)
@@ -196,6 +206,18 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	if cmd == "registro" { // no carga el registro: lo genera
+		fs := flag.NewFlagSet("registro", flag.ExitOnError)
+		dry := fs.Bool("dry", false, "muestra lo generado y el diff, sin escribir")
+		corpus := fs.String("corpus", filepath.Join(filepath.Dir(cfg.RegistryPath), "corpus"), "carpeta con los PDFs")
+		ovs := fs.String("overrides", filepath.Join(filepath.Dir(cfg.RegistryPath), "registry.overrides.json"), "correcciones manuales")
+		salida := fs.String("o", cfg.RegistryPath, "archivo de salida")
+		fs.Parse(args)
+		if err := runRegistro(*corpus, *ovs, *salida, *dry); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
 	reg, err := LoadRegistry(cfg.RegistryPath)
 	if err != nil {
 		log.Fatalf("registro de vigencia: %v", err)
@@ -214,10 +236,11 @@ func main() {
 		file := fs.String("f", "evals.json", "archivo de preguntas golden")
 		k := fs.Int("k", 5, "top-k a evaluar")
 		norerank := fs.Bool("norerank", false, "evaluar sin reranker (para comparar)")
+		conLLM := fs.Bool("llm", false, "correr /ask y verificar debe_contener / no_citar (gasta LLM)")
 		fs.Parse(args)
 		var rag *RAG
-		if rag, err = nuevoRAG(cfg, reg, false, !*norerank); err == nil {
-			err = runEval(ctx, rag, *file, *k, !*norerank)
+		if rag, err = nuevoRAG(cfg, reg, *conLLM, !*norerank || *conLLM); err == nil {
+			err = runEval(ctx, rag, *file, *k, !*norerank, *conLLM)
 		}
 	case "serve":
 		var rag *RAG

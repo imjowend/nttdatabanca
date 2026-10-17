@@ -1,86 +1,179 @@
 [
   {
-    "doc_id": "sbs-g139-2009",
-    "numero": "G-139-2009",
-    "titulo": "Circular SBS sobre gestión de la continuidad del negocio",
-    "tipo": "norma_sbs",
-    "archivo": "corpus/sbs-g139-2009.pdf",
-    "url": "",
-    "fecha": "",
-    "derogado_por": "sbs-877-2020"
+    "doc_id": "pgr-001",
+    "numero": "PGR-001",
+    "titulo": "Política general de gestión de riesgos",
+    "tipo": "Política interna",
+    "archivo": "corpus/01_PGR-001_Politica_General_de_Riesgos_v1.0.pdf",
+    "fecha": "2023-03-15",
+    "vigente_desde": "2023-04-01"
   },
   {
-    "doc_id": "sbs-877-2020",
-    "numero": "877-2020",
-    "titulo": "Reglamento para la Gestión de la Continuidad del Negocio",
-    "tipo": "norma_sbs",
-    "archivo": "corpus/sbs-877-2020.pdf",
-    "url": "",
-    "fecha": "2020",
-    "vigente_desde": "2022-01-01",
-    "modificado_por": ["sbs-1536-2020"]
+    "doc_id": "cir-pla-007-2021",
+    "numero": "CIR-PLA-007-2021",
+    "titulo": "Circular de debida diligencia en operaciones en efectivo",
+    "tipo": "Circular interna",
+    "archivo": "corpus/02_CIR-PLA-007-2021_Debida_Diligencia_Operaciones_Efectivo.pdf",
+    "fecha": "2021-06-10",
+    "vigente_desde": "2021-07-01"
   },
   {
-    "doc_id": "sbs-1536-2020",
-    "numero": "1536-2020",
-    "titulo": "Modificación de la Res. SBS N° 877-2020 y de la Res. SBS N° 5570-2019",
-    "tipo": "norma_sbs",
-    "archivo": "corpus/sbs-1536-2020.pdf",
-    "url": "https://busquedas.elperuano.pe/dispositivo/NL/1867392-1",
-    "fecha": "2020-06-05"
+    "doc_id": "cir-pla-011-2022",
+    "numero": "CIR-PLA-011-2022",
+    "titulo": "Circular de reporte de operaciones inusuales y sospechosas",
+    "tipo": "Circular interna",
+    "archivo": "corpus/03_CIR-PLA-011-2022_Reporte_Operaciones_Inusuales.pdf",
+    "fecha": "2022-04-18",
+    "vigente_desde": "2022-05-01"
   },
   {
-    "doc_id": "sbs-2116-2009",
-    "numero": "2116-2009",
-    "titulo": "Reglamento para la Gestión del Riesgo Operacional",
-    "tipo": "norma_sbs",
-    "archivo": "corpus/sbs-2116-2009.pdf",
-    "url": "",
-    "fecha": "2009",
-    "modificado_por": ["sbs-877-2020"]
+    "doc_id": "cir-tc-021-2024",
+    "numero": "CIR-TC-021-2024",
+    "titulo": "Circular temporal: Campaña de línea paralela de tarjetas de crédito",
+    "tipo": "Circular temporal",
+    "archivo": "corpus/04_CIR-TC-021-2024_Campana_Linea_Paralela_Tarjetas.pdf",
+    "fecha": "2024-05-20",
+    "vigente_desde": "2024-06-01",
+    "vigente_hasta": "2024-12-31"
   },
   {
-    "doc_id": "sbs-272-2017",
-    "numero": "272-2017",
-    "titulo": "Reglamento de Gobierno Corporativo y de la Gestión Integral de Riesgos",
-    "tipo": "norma_sbs",
-    "archivo": "corpus/sbs-272-2017.pdf",
-    "url": "",
-    "fecha": "2017",
-    "modificado_por": ["sbs-877-2020"]
+    "doc_id": "man-pla-001",
+    "numero": "MAN-PLA-001",
+    "titulo": "Texto único ordenado del manual de prevención de LA/FT",
+    "tipo": "Manual (Texto Único Ordenado)",
+    "archivo": "corpus/05_MAN-PLA-001_TUO_Manual_Prevencion_LAFT.pdf",
+    "fecha": "2025-01-15",
+    "vigente_desde": "2025-02-01",
+    "reemplaza": [
+      "cir-pla-007-2021",
+      "cir-pla-011-2022"
+    ],
+    "correspondencias": {
+      "cir-pla-007-2021#articulo-3": "man-pla-001#articulo-3",
+      "cir-pla-007-2021#articulo-4": "man-pla-001#articulo-4",
+      "cir-pla-007-2021#articulo-5": "man-pla-001#articulo-5",
+      "cir-pla-007-2021#articulo-6": "man-pla-001#articulo-6",
+      "cir-pla-011-2022#articulo-2": "man-pla-001#articulo-7",
+      "cir-pla-011-2022#articulo-3": "man-pla-001#articulo-8",
+      "cir-pla-011-2022#articulo-4": "man-pla-001#articulo-9",
+      "cir-pla-011-2022#articulo-5": "man-pla-001#articulo-10",
+      "cir-pla-011-2022#articulo-6": "man-pla-001#articulo-11"
+    }
   },
   {
-    "doc_id": "sbs-504-2021",
-    "numero": "504-2021",
-    "titulo": "Reglamento para la Gestión de la Seguridad de la Información y la Ciberseguridad",
-    "tipo": "norma_sbs",
-    "archivo": "corpus/sbs-504-2021.pdf",
-    "url": "",
-    "fecha": "2021"
+    "doc_id": "rd-061-2025",
+    "numero": "RD-061-2025",
+    "titulo": "Resolución de directorio N° 061-2025: Escisión de la PGR-001",
+    "tipo": "Resolución de Directorio",
+    "archivo": "corpus/06_RD-061-2025_Escision_Politica_General_de_Riesgos.pdf",
+    "fecha": "2025-06-16",
+    "vigente_desde": "2025-07-01",
+    "reemplaza": [
+      "pgr-001"
+    ],
+    "correspondencias": {
+      "pgr-001#articulo-10": "pro-001#articulo-2",
+      "pgr-001#articulo-11": "pro-001#articulo-3",
+      "pgr-001#articulo-12": "rd-061-2025#articulo-4",
+      "pgr-001#articulo-13": "rd-061-2025#articulo-4",
+      "pgr-001#articulo-3": "prc-001#articulo-2",
+      "pgr-001#articulo-4": "prc-001#articulo-3",
+      "pgr-001#articulo-5": "prc-001#articulo-4",
+      "pgr-001#articulo-6": "prc-001#articulo-5",
+      "pgr-001#articulo-7": "prc-001#articulo-6",
+      "pgr-001#articulo-8": "prm-001#articulo-2",
+      "pgr-001#articulo-9": "prm-001#articulo-3"
+    }
   },
   {
-    "doc_id": "int-pol-continuidad-v1",
-    "numero": "POL-CN-01 v1",
-    "titulo": "Política interna de Continuidad del Negocio (Banco Demo)",
-    "tipo": "politica_interna",
-    "archivo": "corpus/int-pol-continuidad-v1.md",
-    "fecha": "2021-03-01",
-    "derogado_por": "int-pol-continuidad-v2"
+    "doc_id": "prc-001",
+    "numero": "PRC-001",
+    "titulo": "Política de riesgo de crédito",
+    "tipo": "Anexo de RD-061-2025",
+    "archivo": "corpus/06_RD-061-2025_Escision_Politica_General_de_Riesgos.pdf",
+    "padre": "rd-061-2025",
+    "vigente_desde": "2025-07-01",
+    "reemplaza": [
+      "pgr-001"
+    ]
   },
   {
-    "doc_id": "int-pol-continuidad-v2",
-    "numero": "POL-CN-01 v2",
-    "titulo": "Política interna de Continuidad del Negocio (Banco Demo)",
-    "tipo": "politica_interna",
-    "archivo": "corpus/int-pol-continuidad-v2.md",
-    "fecha": "2024-02-01"
+    "doc_id": "prm-001",
+    "numero": "PRM-001",
+    "titulo": "Política de riesgo de mercado",
+    "tipo": "Anexo de RD-061-2025",
+    "archivo": "corpus/06_RD-061-2025_Escision_Politica_General_de_Riesgos.pdf",
+    "padre": "rd-061-2025",
+    "vigente_desde": "2025-07-01",
+    "reemplaza": [
+      "pgr-001"
+    ]
   },
   {
-    "doc_id": "int-proc-pruebas-bcp",
-    "numero": "PROC-CN-07",
-    "titulo": "Procedimiento de pruebas del plan de continuidad (Banco Demo)",
-    "tipo": "procedimiento_interno",
-    "archivo": "corpus/int-proc-pruebas-bcp.md",
-    "fecha": "2024-06-15"
+    "doc_id": "pro-001",
+    "numero": "PRO-001",
+    "titulo": "Política de riesgo operacional",
+    "tipo": "Anexo de RD-061-2025",
+    "archivo": "corpus/06_RD-061-2025_Escision_Politica_General_de_Riesgos.pdf",
+    "padre": "rd-061-2025",
+    "vigente_desde": "2025-07-01",
+    "reemplaza": [
+      "pgr-001"
+    ]
+  },
+  {
+    "doc_id": "mod-prc-001-01",
+    "numero": "MOD-PRC-001-01",
+    "titulo": "Modificación puntual N° 01 y fe de erratas a la PRC-001",
+    "tipo": "Modificación puntual / Fe de erratas",
+    "archivo": "corpus/07_MOD-PRC-001-01_Modificacion_y_Fe_de_Erratas.pdf",
+    "fecha": "2026-04-14",
+    "vigente_desde": "2026-05-01",
+    "modifica": [
+      {
+        "doc": "prc-001",
+        "articulos": [
+          4,
+          5
+        ]
+      }
+    ]
+  },
+  {
+    "doc_id": "rex-001-2026",
+    "numero": "REX-001-2026",
+    "titulo": "Régimen excepcional temporal de reprogramación por emergencia",
+    "tipo": "Régimen de excepción temporal",
+    "archivo": "corpus/08_REX-001-2026_Regimen_Excepcional_Reprogramacion.pdf",
+    "fecha": "2026-08-25",
+    "vigente_desde": "2026-09-01",
+    "vigente_hasta": "2027-02-28",
+    "prevalece_sobre": [
+      {
+        "doc": "prc-001",
+        "articulos": [
+          5
+        ]
+      }
+    ]
+  },
+  {
+    "doc_id": "lin-car-001-2026",
+    "numero": "LIN-CAR-001-2026",
+    "titulo": "Lineamiento de criterios unificados de cliente de alto riesgo",
+    "tipo": "Lineamiento corporativo (glosario)",
+    "archivo": "corpus/09_LIN-CAR-001-2026_Nueva_Definicion_Cliente_Alto_Riesgo.pdf",
+    "fecha": "2026-07-20",
+    "vigente_desde": "2026-08-01",
+    "redefine": [
+      {
+        "termino": "Cliente de Alto Riesgo",
+        "chunk": "lin-car-001-2026#articulo-2",
+        "docs": [
+          "prc-001",
+          "man-pla-001"
+        ]
+      }
+    ]
   }
 ]
